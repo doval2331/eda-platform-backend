@@ -1,0 +1,27 @@
+# PostgreSQL para desarrollo, DBeaver y despliegue (Opción B).
+# Uso: docker compose up -d
+# Luego: copiar .env.docker.example → .env y ejecutar scripts/wait_for_db.py + seed_user.py
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eda-platform-postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eda}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eda_local_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-eda_platform}
+    volumes:
+      - eda_pg_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eda -d eda_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  eda_pg_data:
