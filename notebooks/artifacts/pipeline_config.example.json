@@ -1,0 +1,23 @@
+{
+  "reduction_method": "UMAP",
+  "seed": 42,
+  "n_samples_api": 2000,
+  "umap": {
+    "n_neighbors": 15,
+    "min_dist": 0.1
+  },
+  "hdbscan": {
+    "min_cluster_size": 25,
+    "min_samples": 8,
+    "cluster_selection_method": "eom"
+  },
+  "tsne_max_samples": 3000,
+  "metrics_full_10k": {
+    "silhouette": null,
+    "davies_bouldin": null,
+    "outliers_count": null,
+    "outliers_pct": null,
+    "n_clusters": null
+  },
+  "notes": "Generado por notebooks/01_it_ops_eda.ipynb — copiar a pipeline_config.json tras ejecutar en Colab"
+}
