@@ -9,17 +9,56 @@ from app.api.deps import get_current_user
 from app.config import get_settings
 from app.db import AnalysisRun, User, get_db, run_to_detail, save_run
 from app.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ConversationDashboardResponse,
     DatasetProfileResponse,
     HealthResponse,
+    InsightSelectionBody,
+    BiSyncResponse,
+    MetabaseDashboardCreateResponse,
+    MetabaseStatusResponse,
     PipelineMetrics,
     RunCreateBody,
     RunDetail,
     RunSummary,
 )
 from app.services.dataset_store import get_dataset_meta, save_upload
+from app.services.conversation import build_chat_response
+from app.services.duckdb_store import (
+    list_selected_insights,
+    persist_run_detail,
+    run_exists,
+    save_selected_insight,
+)
+from app.services.bi_postgres_store import (
+    get_bi_status,
+    sync_bi_tables,
+    try_sync_bi_tables,
+)
+from app.services.metabase_dashboard import (
+    MetabaseDashboardError,
+    create_conversation_dashboard,
+)
 from app.services.pipeline import run_pipeline
 
 router = APIRouter()
+
+
+def _bi_sync_response(run_id: str | None = None) -> BiSyncResponse:
+    try:
+        result = sync_bi_tables(run_id=run_id, force=True)
+    except Exception as exc:
+        return BiSyncResponse(
+            status="error",
+            message=f"No se pudo sincronizar PostgreSQL BI: {exc}",
+            tables={},
+        )
+    return BiSyncResponse(
+        status=result.status,
+        message=result.message,
+        tables=result.tables,
+    )
 
 
 def _metrics_from_row(row: AnalysisRun) -> PipelineMetrics:
@@ -44,6 +83,18 @@ def _metrics_from_row(row: AnalysisRun) -> PipelineMetrics:
         davies_bouldin=dbi,
         n_clusters=n_clusters,
     )
+
+
+def _get_run_or_404(db: Session, run_id: str) -> AnalysisRun:
+    row = db.get(AnalysisRun, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Ejecucion no encontrada")
+    return row
+
+
+def _materialize_run_in_duckdb(row: AnalysisRun) -> None:
+    if not run_exists(row.id):
+        persist_run_detail(run_to_detail(row))
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -138,7 +189,10 @@ def create_run(
         "result": result.model_dump(),
     }
     row = save_run(db, payload=payload)
-    return RunDetail(**run_to_detail(row))
+    detail = run_to_detail(row)
+    persist_run_detail(detail)
+    try_sync_bi_tables(row.id)
+    return RunDetail(**detail)
 
 
 @router.get("/api/runs", response_model=list[RunSummary])
@@ -169,6 +223,81 @@ def list_runs(
     ]
 
 
+@router.post("/api/runs/{run_id}/chat", response_model=ChatResponse)
+def chat_with_run(
+    run_id: str,
+    body: ChatRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    return build_chat_response(run_id, body.question)
+
+
+@router.post("/api/runs/{run_id}/insights/select")
+def select_run_insight(
+    run_id: str,
+    body: InsightSelectionBody,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    save_selected_insight(run_id, body.insight.model_dump(), user_id=_user.id)
+    try_sync_bi_tables(run_id)
+    return {"status": "ok"}
+
+
+@router.get("/api/conversation-dashboard", response_model=ConversationDashboardResponse)
+def get_conversation_dashboard(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    run_id: str | None = None,
+):
+    if run_id:
+        row = _get_run_or_404(db, run_id)
+        _materialize_run_in_duckdb(row)
+    insights = list_selected_insights(run_id=run_id, user_id=user.id)
+    return ConversationDashboardResponse(total=len(insights), insights=insights)
+
+
+@router.get("/api/metabase/status", response_model=MetabaseStatusResponse)
+def metabase_status(_user: Annotated[User, Depends(get_current_user)]):
+    return MetabaseStatusResponse(**get_bi_status())
+
+
+@router.post("/api/metabase/dashboard", response_model=MetabaseDashboardCreateResponse)
+def create_metabase_dashboard(_user: Annotated[User, Depends(get_current_user)]):
+    try:
+        sync_bi_tables(force=True)
+        result = create_conversation_dashboard()
+    except MetabaseDashboardError as exc:
+        return MetabaseDashboardCreateResponse(status="error", message=str(exc))
+    except Exception as exc:
+        return MetabaseDashboardCreateResponse(
+            status="error",
+            message=f"No se pudo crear el dashboard en Metabase: {exc}",
+        )
+    return MetabaseDashboardCreateResponse(**result)
+
+
+@router.post("/api/bi-sync", response_model=BiSyncResponse)
+def sync_all_bi_tables(_user: Annotated[User, Depends(get_current_user)]):
+    return _bi_sync_response()
+
+
+@router.post("/api/runs/{run_id}/bi-sync", response_model=BiSyncResponse)
+def sync_run_bi_tables(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    return _bi_sync_response(run_id)
+
+
 @router.get("/api/runs/{run_id}", response_model=RunDetail)
 def get_run(
     run_id: str,
@@ -178,4 +307,5 @@ def get_run(
     row = db.get(AnalysisRun, run_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Ejecución no encontrada")
+    _materialize_run_in_duckdb(row)
     return RunDetail(**run_to_detail(row))
