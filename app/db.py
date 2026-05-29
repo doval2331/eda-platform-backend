@@ -41,6 +41,23 @@ class AnalysisRun(Base):
     result_json: Mapped[str] = mapped_column(Text)
 
 
+class SelectedInsight(Base):
+    __tablename__ = "selected_insights"
+
+    selected_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    id: Mapped[str] = mapped_column(String(160))
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    selected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text)
+    metric_label: Mapped[str] = mapped_column(String(120))
+    metric_value: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dimension: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    filter_kind: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    filter_value: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
 def _engine():
     url = get_settings().database_url
     connect_args = {}

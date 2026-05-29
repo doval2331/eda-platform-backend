@@ -94,3 +94,49 @@ class LoginResponse(BaseModel):
     token: str
     token_type: str = "bearer"
     user: UserPublic
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=600)
+
+
+class InsightPayload(BaseModel):
+    id: str
+    title: str
+    description: str
+    metric_label: str
+    metric_value: float | None = None
+    dimension: str | None = None
+    filter_kind: str | None = None
+    filter_value: str | None = None
+
+
+class InsightSelectRequest(BaseModel):
+    insight: InsightPayload
+
+
+class InsightDashboardItem(InsightPayload):
+    run_id: str
+    selected_at: datetime
+    run_created_at: datetime
+    modality: Modality
+    reduction_method: ReductionMethod
+    evidence_count: int | None = None
+    avg_sla_breach_rate: float | None = None
+    avg_risk: float | None = None
+
+
+class InsightSelectResponse(BaseModel):
+    status: str = "ok"
+    insight: InsightDashboardItem
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    insights: list[InsightPayload] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
+
+
+class ConversationDashboardResponse(BaseModel):
+    total: int
+    insights: list[InsightDashboardItem]

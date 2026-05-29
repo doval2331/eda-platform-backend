@@ -25,6 +25,19 @@ class Settings(BaseSettings):
     demo_user_email: str = "analista@tfm.local"
     demo_user_password: str = "TfmDemo2026!"
     demo_user_nombre: str = "Analista TFM"
+    bi_sync_enabled: bool = True
+    bi_database_url: str = "postgresql+psycopg2://tfm:tfm@127.0.0.1:5432/tfm_it"
+    metabase_url: str = "http://127.0.0.1:3000"
+    metabase_dashboard_url: str | None = None
+    metabase_username: str | None = None
+    metabase_password: str | None = None
+    metabase_database_name: str = "TFM IT Analytics"
+    metabase_dashboard_name: str = "Dashboard IT - Evidencias conversacionales"
+    metabase_pg_host: str = "tfm-analytics-db"
+    metabase_pg_port: int = 5432
+    metabase_pg_dbname: str = "tfm_it"
+    metabase_pg_user: str = "tfm"
+    metabase_pg_password: str = "tfm"
 
     @property
     def cors_origin_list(self) -> list[str]:
