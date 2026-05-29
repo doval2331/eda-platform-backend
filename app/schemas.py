@@ -13,9 +13,24 @@ class EvidenceMetadata(BaseModel):
     source: Modality
     sector: str | None = None
     service_line: str | None = None
+    support_channel: str | None = None
+    segment: str | None = None
+    category: str | None = None
+    severity: str | None = None
+    status: str | None = None
+    assignment_group: str | None = None
+    affected_service: str | None = None
     monthly_tickets: float | None = None
+    critical_incidents: float | None = None
+    avg_resolution_hours: float | None = None
+    resolution_minutes: float | None = None
     sla_breach_rate: float | None = None
+    sla_breached: bool | None = None
     operational_risk_score: float | None = None
+    business_impact_score: float | None = None
+    security_incidents: float | None = None
+    downtime_hours: float | None = None
+    customer_satisfaction: float | None = None
 
 
 class PipelineMetrics(BaseModel):
@@ -97,46 +112,71 @@ class LoginResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=600)
+    question: str = Field(..., min_length=1, max_length=1000)
 
 
-class InsightPayload(BaseModel):
+class InsightCandidate(BaseModel):
     id: str
     title: str
     description: str
-    metric_label: str
+    metric_label: str | None = None
     metric_value: float | None = None
     dimension: str | None = None
     filter_kind: str | None = None
     filter_value: str | None = None
 
 
-class InsightSelectRequest(BaseModel):
-    insight: InsightPayload
-
-
-class InsightDashboardItem(InsightPayload):
-    run_id: str
-    selected_at: datetime
-    run_created_at: datetime
-    modality: Modality
-    reduction_method: ReductionMethod
-    evidence_count: int | None = None
-    avg_sla_breach_rate: float | None = None
-    avg_risk: float | None = None
-
-
-class InsightSelectResponse(BaseModel):
-    status: str = "ok"
-    insight: InsightDashboardItem
-
-
 class ChatResponse(BaseModel):
     answer: str
-    insights: list[InsightPayload] = Field(default_factory=list)
     suggested_questions: list[str] = Field(default_factory=list)
+    insights: list[InsightCandidate] = Field(default_factory=list)
+
+
+class InsightSelectionBody(BaseModel):
+    insight: InsightCandidate
+
+
+class SelectedInsightDashboardItem(InsightCandidate):
+    run_id: str
+    selected_at: datetime
+    run_created_at: datetime | None = None
+    modality: Modality | None = None
+    reduction_method: ReductionMethod | None = None
+    evidence_count: int | None = None
+    avg_sla_breach_rate: float | None = None
+    avg_resolution_hours: float | None = None
+    avg_risk: float | None = None
 
 
 class ConversationDashboardResponse(BaseModel):
     total: int
-    insights: list[InsightDashboardItem]
+    insights: list[SelectedInsightDashboardItem] = Field(default_factory=list)
+
+
+class BiSyncResponse(BaseModel):
+    status: str
+    message: str
+    tables: dict[str, int] = Field(default_factory=dict)
+
+
+class MetabaseStatusResponse(BaseModel):
+    enabled: bool
+    metabase_url: str
+    dashboard_url: str | None = None
+    postgres_status: str
+    detail: str | None = None
+
+
+class MetabaseDashboardCard(BaseModel):
+    id: int
+    name: str
+    url: str
+
+
+class MetabaseDashboardCreateResponse(BaseModel):
+    status: str
+    message: str
+    dashboard_id: int | None = None
+    dashboard_url: str | None = None
+    database_id: int | None = None
+    cards: list[MetabaseDashboardCard] = Field(default_factory=list)

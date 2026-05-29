@@ -1,0 +1,378 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import pandas as pd
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
+
+from app.config import get_settings
+from app.services.duckdb_store import _connect, init_duckdb
+
+
+@dataclass
+class BiSyncResult:
+    status: str
+    message: str
+    tables: dict[str, int]
+
+
+def _settings():
+    return get_settings()
+
+
+def is_bi_sync_enabled() -> bool:
+    return bool(_settings().bi_sync_enabled)
+
+
+def _engine() -> Engine:
+    return create_engine(_settings().bi_database_url, pool_pre_ping=True)
+
+
+def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df.where(pd.notnull(df), None)
+
+
+def _read_duckdb(query: str, params: list[Any] | None = None) -> pd.DataFrame:
+    init_duckdb()
+    with _connect() as con:
+        return _clean_df(con.execute(query, params or []).df())
+
+
+def init_bi_schema(engine: Engine | None = None) -> None:
+    engine = engine or _engine()
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS bi_runs (
+            run_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP,
+            modality TEXT,
+            reduction_method TEXT,
+            seed INTEGER,
+            n_samples INTEGER,
+            outliers_count INTEGER,
+            silhouette DOUBLE PRECISION,
+            davies_bouldin DOUBLE PRECISION,
+            n_clusters INTEGER
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_evidences (
+            run_id TEXT,
+            evidence_index INTEGER,
+            evidence_id TEXT,
+            preview TEXT,
+            source TEXT,
+            x DOUBLE PRECISION,
+            y DOUBLE PRECISION,
+            cluster_label INTEGER,
+            sector TEXT,
+            service_line TEXT,
+            support_channel TEXT,
+            segment TEXT,
+            category TEXT,
+            severity TEXT,
+            status TEXT,
+            assignment_group TEXT,
+            affected_service TEXT,
+            monthly_tickets DOUBLE PRECISION,
+            critical_incidents DOUBLE PRECISION,
+            avg_resolution_hours DOUBLE PRECISION,
+            resolution_minutes DOUBLE PRECISION,
+            sla_breach_rate DOUBLE PRECISION,
+            sla_breached BOOLEAN,
+            operational_risk_score DOUBLE PRECISION,
+            business_impact_score DOUBLE PRECISION,
+            security_incidents DOUBLE PRECISION,
+            downtime_hours DOUBLE PRECISION,
+            customer_satisfaction DOUBLE PRECISION
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_cluster_summary (
+            run_id TEXT,
+            cluster_label INTEGER,
+            evidence_count INTEGER,
+            avg_monthly_tickets DOUBLE PRECISION,
+            avg_sla_breach_rate DOUBLE PRECISION,
+            avg_resolution_hours DOUBLE PRECISION,
+            avg_risk DOUBLE PRECISION
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_sla_by_category (
+            run_id TEXT,
+            category TEXT,
+            evidence_count INTEGER,
+            sla_breached_count INTEGER,
+            avg_sla_breach_rate DOUBLE PRECISION,
+            avg_resolution_hours DOUBLE PRECISION,
+            avg_risk DOUBLE PRECISION
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_service_risk (
+            run_id TEXT,
+            affected_service TEXT,
+            evidence_count INTEGER,
+            avg_sla_breach_rate DOUBLE PRECISION,
+            avg_resolution_hours DOUBLE PRECISION,
+            avg_risk DOUBLE PRECISION,
+            avg_business_impact DOUBLE PRECISION,
+            total_security_incidents DOUBLE PRECISION,
+            total_downtime_hours DOUBLE PRECISION
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_selected_insights (
+            selected_key TEXT PRIMARY KEY,
+            run_id TEXT,
+            user_id TEXT,
+            insight_id TEXT,
+            title TEXT,
+            description TEXT,
+            metric_label TEXT,
+            metric_value DOUBLE PRECISION,
+            dimension TEXT,
+            filter_kind TEXT,
+            filter_value TEXT,
+            selected_at TIMESTAMP
+        )
+        """,
+    ]
+    with engine.begin() as con:
+        for statement in statements:
+            con.execute(text(statement))
+        con.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_bi_evidences_run "
+                "ON bi_evidences(run_id)"
+            )
+        )
+        con.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_bi_evidences_cluster "
+                "ON bi_evidences(run_id, cluster_label)"
+            )
+        )
+        con.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_bi_selected_run "
+                "ON bi_selected_insights(run_id)"
+            )
+        )
+
+
+def _run_filter(column: str, run_id: str | None) -> tuple[str, list[Any]]:
+    if not run_id:
+        return "", []
+    return f"WHERE {column} = ?", [run_id]
+
+
+def _load_bi_frames(run_id: str | None = None) -> dict[str, pd.DataFrame]:
+    run_where, params = _run_filter("run_id", run_id)
+    evidence_where, evidence_params = _run_filter("run_id", run_id)
+
+    frames = {
+        "bi_runs": _read_duckdb(
+            f"""
+            SELECT *
+            FROM run_registry
+            {run_where}
+            """,
+            params,
+        ),
+        "bi_evidences": _read_duckdb(
+            f"""
+            SELECT *
+            FROM run_evidences
+            {evidence_where}
+            """,
+            evidence_params,
+        ),
+        "bi_cluster_summary": _read_duckdb(
+            f"""
+            SELECT
+                run_id,
+                cluster_label,
+                CAST(evidence_count AS INTEGER) AS evidence_count,
+                avg_monthly_tickets,
+                avg_sla_breach_rate,
+                avg_resolution_hours,
+                avg_risk
+            FROM vw_cluster_summary
+            {run_where}
+            """,
+            params,
+        ),
+        "bi_sla_by_category": _read_duckdb(
+            f"""
+            SELECT
+                run_id,
+                COALESCE(category, 'Sin categoria') AS category,
+                CAST(COUNT(*) AS INTEGER) AS evidence_count,
+                CAST(SUM(CASE WHEN sla_breached THEN 1 ELSE 0 END) AS INTEGER)
+                    AS sla_breached_count,
+                AVG(sla_breach_rate) AS avg_sla_breach_rate,
+                AVG(avg_resolution_hours) AS avg_resolution_hours,
+                AVG(operational_risk_score) AS avg_risk
+            FROM run_evidences
+            {evidence_where}
+            GROUP BY run_id, COALESCE(category, 'Sin categoria')
+            """,
+            evidence_params,
+        ),
+        "bi_service_risk": _read_duckdb(
+            f"""
+            SELECT
+                run_id,
+                COALESCE(affected_service, service_line, 'Sin servicio') AS affected_service,
+                CAST(COUNT(*) AS INTEGER) AS evidence_count,
+                AVG(sla_breach_rate) AS avg_sla_breach_rate,
+                AVG(avg_resolution_hours) AS avg_resolution_hours,
+                AVG(operational_risk_score) AS avg_risk,
+                AVG(business_impact_score) AS avg_business_impact,
+                SUM(security_incidents) AS total_security_incidents,
+                SUM(downtime_hours) AS total_downtime_hours
+            FROM run_evidences
+            {evidence_where}
+            GROUP BY run_id, COALESCE(affected_service, service_line, 'Sin servicio')
+            """,
+            evidence_params,
+        ),
+    }
+
+    selected_where, selected_params = _run_filter("run_id", run_id)
+    selected = _read_duckdb(
+        f"""
+        SELECT
+            run_id,
+            user_id,
+            insight_id,
+            title,
+            description,
+            metric_label,
+            metric_value,
+            dimension,
+            filter_kind,
+            filter_value,
+            selected_at
+        FROM selected_insights
+        {selected_where}
+        """,
+        selected_params,
+    )
+    if not selected.empty:
+        selected["selected_key"] = selected.apply(
+            lambda row: (
+                f"{row.get('run_id')}:"
+                f"{row.get('user_id') or 'anon'}:"
+                f"{row.get('insight_id')}"
+            ),
+            axis=1,
+        )
+        selected = selected[
+            [
+                "selected_key",
+                "run_id",
+                "user_id",
+                "insight_id",
+                "title",
+                "description",
+                "metric_label",
+                "metric_value",
+                "dimension",
+                "filter_kind",
+                "filter_value",
+                "selected_at",
+            ]
+        ]
+    frames["bi_selected_insights"] = selected
+    return frames
+
+
+def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncResult:
+    if not force and not is_bi_sync_enabled():
+        return BiSyncResult(
+            status="disabled",
+            message="BI sync deshabilitado. Activar BI_SYNC_ENABLED=true.",
+            tables={},
+        )
+
+    engine = _engine()
+    init_bi_schema(engine)
+    frames = _load_bi_frames(run_id=run_id)
+
+    with engine.begin() as con:
+        if run_id:
+            for table in (
+                "bi_selected_insights",
+                "bi_service_risk",
+                "bi_sla_by_category",
+                "bi_cluster_summary",
+                "bi_evidences",
+                "bi_runs",
+            ):
+                con.execute(text(f"DELETE FROM {table} WHERE run_id = :run_id"), {"run_id": run_id})
+        else:
+            for table in (
+                "bi_selected_insights",
+                "bi_service_risk",
+                "bi_sla_by_category",
+                "bi_cluster_summary",
+                "bi_evidences",
+                "bi_runs",
+            ):
+                con.execute(text(f"DELETE FROM {table}"))
+
+        counts: dict[str, int] = {}
+        for table, df in frames.items():
+            counts[table] = len(df)
+            if not df.empty:
+                df.to_sql(table, con, if_exists="append", index=False, method="multi")
+
+    return BiSyncResult(
+        status="ok",
+        message="Tablas BI sincronizadas en PostgreSQL para Metabase.",
+        tables=counts,
+    )
+
+
+def try_sync_bi_tables(run_id: str | None = None) -> BiSyncResult:
+    try:
+        return sync_bi_tables(run_id=run_id)
+    except Exception as exc:  # pragma: no cover - evita romper el pipeline local.
+        return BiSyncResult(
+            status="error",
+            message=f"No se pudo sincronizar PostgreSQL BI: {exc}",
+            tables={},
+        )
+
+
+def get_bi_status() -> dict[str, Any]:
+    settings = _settings()
+    status: dict[str, Any] = {
+        "enabled": settings.bi_sync_enabled,
+        "metabase_url": settings.metabase_url,
+        "dashboard_url": settings.metabase_dashboard_url or None,
+        "postgres_status": "disabled" if not settings.bi_sync_enabled else "unknown",
+        "detail": None,
+    }
+    if not settings.bi_sync_enabled:
+        status["detail"] = "BI_SYNC_ENABLED=false"
+        return status
+
+    try:
+        engine = _engine()
+        init_bi_schema(engine)
+        with engine.connect() as con:
+            con.execute(text("SELECT 1"))
+        status["postgres_status"] = "ok"
+        status["detail"] = "PostgreSQL BI disponible"
+    except Exception as exc:  # pragma: no cover - depende de servicio externo.
+        status["postgres_status"] = "error"
+        status["detail"] = str(exc)
+    return status

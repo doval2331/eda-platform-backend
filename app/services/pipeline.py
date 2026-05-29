@@ -67,6 +67,36 @@ def _cluster_count(labels: np.ndarray) -> int:
     return len({int(x) for x in labels.tolist() if int(x) >= 0})
 
 
+def _num_or_none(val) -> float | None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _str_or_none(val) -> str | None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    text = str(val).strip()
+    return text or None
+
+
+def _severity_from_risk(risk: float | None, critical_incidents: float | None) -> str | None:
+    if risk is None and critical_incidents is None:
+        return None
+    risk_value = risk or 0.0
+    incidents = critical_incidents or 0.0
+    if risk_value >= 70 or incidents >= 8:
+        return "critical"
+    if risk_value >= 50 or incidents >= 5:
+        return "high"
+    if risk_value >= 30 or incidents >= 2:
+        return "medium"
+    return "low"
+
+
 def _build_it_ops_metadata(
     df,
     cluster_labels: np.ndarray,
@@ -77,21 +107,44 @@ def _build_it_ops_metadata(
         preview = build_record_preview(row)
         if cluster_labels[i] == -1:
             preview = f"[Outlier] {preview}"
-        def _num(val):
-            if val is None or (isinstance(val, float) and pd.isna(val)):
-                return None
-            return float(val)
+
+        risk = _num_or_none(row.get("operational_risk_score"))
+        critical_incidents = _num_or_none(row.get("critical_incidents"))
+        avg_resolution_hours = _num_or_none(row.get("avg_resolution_hours"))
+        sla_breach_rate = _num_or_none(row.get("sla_breach_rate"))
+        service_line = _str_or_none(row.get("service_line"))
+        sector = _str_or_none(row.get("sector"))
+        support_channel = _str_or_none(row.get("support_channel"))
 
         items.append(
             EvidenceMetadata(
                 id=str(row.get("client_id", f"C{i + 1:05d}")),
                 preview=preview,
                 source="it_ops",
-                sector=str(row.get("sector", "")) or None,
-                service_line=str(row.get("service_line", "")) or None,
-                monthly_tickets=_num(row.get("monthly_tickets")),
-                sla_breach_rate=_num(row.get("sla_breach_rate")),
-                operational_risk_score=_num(row.get("operational_risk_score")),
+                sector=sector,
+                service_line=service_line,
+                support_channel=support_channel,
+                segment=_str_or_none(row.get("segment")),
+                category=sector,
+                severity=_severity_from_risk(risk, critical_incidents),
+                status="active",
+                assignment_group=support_channel,
+                affected_service=service_line,
+                monthly_tickets=_num_or_none(row.get("monthly_tickets")),
+                critical_incidents=critical_incidents,
+                avg_resolution_hours=avg_resolution_hours,
+                resolution_minutes=(
+                    avg_resolution_hours * 60 if avg_resolution_hours is not None else None
+                ),
+                sla_breach_rate=sla_breach_rate,
+                sla_breached=(
+                    bool(sla_breach_rate >= 0.12) if sla_breach_rate is not None else None
+                ),
+                operational_risk_score=risk,
+                business_impact_score=risk,
+                security_incidents=_num_or_none(row.get("security_incidents")),
+                downtime_hours=_num_or_none(row.get("downtime_hours")),
+                customer_satisfaction=_num_or_none(row.get("customer_satisfaction")),
             )
         )
     return items

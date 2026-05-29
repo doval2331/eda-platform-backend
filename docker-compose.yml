@@ -1,6 +1,6 @@
-# PostgreSQL para desarrollo, DBeaver y despliegue (Opción B).
+# PostgreSQL + Metabase para desarrollo local.
 # Uso: docker compose up -d
-# Luego: copiar .env.docker.example → .env y ejecutar scripts/wait_for_db.py + seed_user.py
+# Luego copiar .env.docker.example a .env y ejecutar seed_user.py si hace falta.
 
 services:
   postgres:
@@ -17,11 +17,28 @@ services:
       - eda_pg_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eda -d eda_platform"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eda} -d ${POSTGRES_DB:-eda_platform}"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  metabase:
+    image: metabase/metabase:latest
+    container_name: eda-platform-metabase
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_PORT: 5432
+      MB_DB_DBNAME: ${METABASE_APP_DB:-metabase}
+      MB_DB_USER: ${POSTGRES_USER:-eda}
+      MB_DB_PASS: ${POSTGRES_PASSWORD:-eda_local_dev}
 
 volumes:
   eda_pg_data:
