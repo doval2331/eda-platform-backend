@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     metabase_password: str = ""
     metabase_database_name: str = "TFM IT Analytics"
     metabase_dashboard_name: str = "Dashboard IT - Evidencias conversacionales"
+    llm_enabled: bool = False
+    llm_provider: str = "openai_compatible"
+    llm_api_base: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4.1-mini"
+    llm_timeout_seconds: int = 20
     jwt_secret: str = "change-me-in-production-use-long-random-string"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 480

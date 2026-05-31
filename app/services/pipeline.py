@@ -83,6 +83,19 @@ def _str_or_none(val) -> str | None:
     return text or None
 
 
+def _bool_or_none(val) -> bool | None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    if isinstance(val, bool):
+        return val
+    text = str(val).strip().lower()
+    if text in {"true", "1", "si", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
 def _severity_from_risk(risk: float | None, critical_incidents: float | None) -> str | None:
     if risk is None and critical_incidents is None:
         return None
@@ -121,6 +134,17 @@ def _build_it_ops_metadata(
                 id=str(row.get("client_id", f"C{i + 1:05d}")),
                 preview=preview,
                 source="it_ops",
+                incident_id=str(row.get("client_id", f"C{i + 1:05d}")),
+                categoria=sector,
+                prioridad=_severity_from_risk(risk, critical_incidents),
+                servicio_afectado=service_line,
+                canal_entrada=support_channel,
+                tiempo_resolucion_horas=avg_resolution_hours,
+                sla_incumplido=(
+                    bool(sla_breach_rate >= 0.12) if sla_breach_rate is not None else None
+                ),
+                satisfaccion_usuario=_num_or_none(row.get("customer_satisfaction")),
+                synthetic_segment=_str_or_none(row.get("segment")),
                 sector=sector,
                 service_line=service_line,
                 support_channel=support_channel,
@@ -166,11 +190,49 @@ def _build_tabular_metadata(
             if id_column and id_column in row.index
             else f"row_{i + 1}"
         )
+        sla_incumplido = _bool_or_none(row.get("sla_incumplido"))
+        sla_rate = _num_or_none(row.get("sla_breach_rate"))
+        if sla_rate is None and sla_incumplido is not None:
+            sla_rate = 1.0 if sla_incumplido else 0.0
+        tiempo_resolucion_horas = _num_or_none(row.get("tiempo_resolucion_horas"))
         items.append(
             EvidenceMetadata(
                 id=row_id,
                 preview=preview,
                 source="tabular",
+                incident_id=_str_or_none(row.get("incident_id")) or row_id,
+                categoria=_str_or_none(row.get("categoria")) or _str_or_none(row.get("category")),
+                subcategoria=_str_or_none(row.get("subcategoria")),
+                prioridad=_str_or_none(row.get("prioridad")) or _str_or_none(row.get("severity")),
+                servicio_afectado=(
+                    _str_or_none(row.get("servicio_afectado"))
+                    or _str_or_none(row.get("affected_service"))
+                ),
+                canal_entrada=_str_or_none(row.get("canal_entrada")),
+                tiempo_resolucion_horas=tiempo_resolucion_horas,
+                sla_incumplido=sla_incumplido,
+                reaperturas=_num_or_none(row.get("reaperturas")),
+                escalados=_num_or_none(row.get("escalados")),
+                satisfaccion_usuario=_num_or_none(row.get("satisfaccion_usuario")),
+                coste_estimado=_num_or_none(row.get("coste_estimado")),
+                descripcion_corta=_str_or_none(row.get("descripcion_corta")),
+                causa_raiz_simulada=_str_or_none(row.get("causa_raiz_simulada")),
+                synthetic_segment=_str_or_none(row.get("synthetic_segment")),
+                category=_str_or_none(row.get("categoria")) or _str_or_none(row.get("category")),
+                severity=_str_or_none(row.get("prioridad")) or _str_or_none(row.get("severity")),
+                affected_service=(
+                    _str_or_none(row.get("servicio_afectado"))
+                    or _str_or_none(row.get("affected_service"))
+                ),
+                avg_resolution_hours=tiempo_resolucion_horas,
+                resolution_minutes=(
+                    tiempo_resolucion_horas * 60
+                    if tiempo_resolucion_horas is not None
+                    else None
+                ),
+                sla_breach_rate=sla_rate,
+                sla_breached=sla_incumplido,
+                customer_satisfaction=_num_or_none(row.get("satisfaccion_usuario")),
             )
         )
     return items

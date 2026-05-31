@@ -13,6 +13,21 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 MAX_CATEGORICAL_CARDINALITY = 40
 MIN_FEATURE_COLUMNS = 2
+DEFAULT_EXCLUDED_COLUMNS = {
+    "synthetic_segment",
+    "descripcion_corta",
+    "description",
+    "descripcion_larga",
+    "texto",
+    "text",
+}
+KNOWN_NUMERIC_COLUMNS = {
+    "tiempo_resolucion_horas",
+    "reaperturas",
+    "escalados",
+    "satisfaccion_usuario",
+    "coste_estimado",
+}
 
 
 @dataclass
@@ -35,7 +50,7 @@ def load_tabular_csv(path, *, n_samples: int | None = None, seed: int = 42) -> p
 
 def _is_likely_id(series: pd.Series, n_rows: int) -> bool:
     name = str(series.name).lower()
-    if name in {"id", "uuid", "client_id", "record_id", "row_id"}:
+    if name in {"id", "uuid", "client_id", "incident_id", "ticket_id", "record_id", "row_id"}:
         return True
     if series.dtype == object and series.nunique() == n_rows:
         return True
@@ -47,7 +62,7 @@ def profile_dataframe(
     *,
     exclude_columns: list[str] | None = None,
 ) -> TabularColumnProfile:
-    exclude = set(exclude_columns or [])
+    exclude = set(exclude_columns or []) | DEFAULT_EXCLUDED_COLUMNS
     numeric: list[str] = []
     categorical: list[str] = []
     excluded: list[str] = []
@@ -71,6 +86,9 @@ def profile_dataframe(
             continue
 
         if pd.api.types.is_numeric_dtype(series):
+            if col in KNOWN_NUMERIC_COLUMNS:
+                numeric.append(col)
+                continue
             low_card = nunique <= min(20, max(5, int(0.05 * n_rows)))
             if low_card:
                 categorical.append(col)
@@ -85,7 +103,7 @@ def profile_dataframe(
                 excluded.append(col)
 
     suggested_id = None
-    for preferred in ("client_id", "id", "record_id", "uuid"):
+    for preferred in ("incident_id", "ticket_id", "client_id", "id", "record_id", "uuid"):
         if preferred in id_candidates:
             suggested_id = preferred
             break
@@ -135,7 +153,6 @@ def build_generic_preprocessor(
     if categorical_cols:
         categorical_pipe = Pipeline(
             [
-                ("imputer", SimpleImputer(strategy="most_frequent")),
                 (
                     "onehot",
                     OneHotEncoder(handle_unknown="ignore", sparse_output=False),
@@ -159,11 +176,17 @@ def dataframe_to_features_generic(
     if missing:
         raise ValueError(f"Columnas no encontradas en el dataset: {missing}")
 
+    data = df[feature_cols].copy()
+    for col in numeric_cols:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+    for col in categorical_cols:
+        data[col] = data[col].astype("string").fillna("desconocido").astype(str)
+
     if preprocessor is None:
         preprocessor = build_generic_preprocessor(numeric_cols, categorical_cols)
-        X = preprocessor.fit_transform(df[feature_cols])
+        X = preprocessor.fit_transform(data)
     else:
-        X = preprocessor.transform(df[feature_cols])
+        X = preprocessor.transform(data)
 
     return np.asarray(X, dtype=np.float64), preprocessor
 
