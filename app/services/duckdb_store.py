@@ -127,6 +127,71 @@ def init_duckdb() -> None:
         )
 
 
+REGISTRY_COLUMNS = [
+    "run_id",
+    "created_at",
+    "modality",
+    "reduction_method",
+    "seed",
+    "n_samples",
+    "outliers_count",
+    "silhouette",
+    "davies_bouldin",
+    "n_clusters",
+]
+
+EVIDENCE_COLUMNS = [
+    "run_id",
+    "evidence_index",
+    "evidence_id",
+    "preview",
+    "source",
+    "x",
+    "y",
+    "cluster_label",
+    "sector",
+    "service_line",
+    "support_channel",
+    "segment",
+    "category",
+    "severity",
+    "status",
+    "assignment_group",
+    "affected_service",
+    "monthly_tickets",
+    "critical_incidents",
+    "avg_resolution_hours",
+    "resolution_minutes",
+    "sla_breach_rate",
+    "sla_breached",
+    "operational_risk_score",
+    "business_impact_score",
+    "security_incidents",
+    "downtime_hours",
+    "customer_satisfaction",
+]
+
+
+def _insert_dataframe(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    df: pd.DataFrame,
+    columns: list[str],
+    register_name: str,
+) -> None:
+    if df.empty:
+        return
+    missing = [column for column in columns if column not in df.columns]
+    if missing:
+        raise ValueError(f"Faltan columnas para {table}: {', '.join(missing)}")
+    subset = df[columns]
+    column_list = ", ".join(columns)
+    con.register(register_name, subset)
+    con.execute(
+        f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {register_name}"
+    )
+
+
 def _metric_value(metrics: dict[str, Any], name: str) -> float | None:
     value = metrics.get(name)
     if value is None:
@@ -225,11 +290,10 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
     with _connect() as con:
         con.execute("DELETE FROM run_registry WHERE run_id = ?", [run_id])
         con.execute("DELETE FROM run_evidences WHERE run_id = ?", [run_id])
-        con.register("registry_df", registry_df)
-        con.execute("INSERT INTO run_registry SELECT * FROM registry_df")
-        if not evidences_df.empty:
-            con.register("evidences_df", evidences_df)
-            con.execute("INSERT INTO run_evidences SELECT * FROM evidences_df")
+        _insert_dataframe(con, "run_registry", registry_df, REGISTRY_COLUMNS, "registry_df")
+        _insert_dataframe(
+            con, "run_evidences", evidences_df, EVIDENCE_COLUMNS, "evidences_df"
+        )
 
 
 def run_exists(run_id: str) -> bool:
