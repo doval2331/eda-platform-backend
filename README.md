@@ -56,6 +56,10 @@ Variables principales en `.env`:
 | `METABASE_PASSWORD` | password del usuario admin de Metabase |
 | `METABASE_DATABASE_NAME` | `TFM IT Analytics` |
 | `METABASE_DASHBOARD_NAME` | `Dashboard IT - Evidencias conversacionales` |
+| `METABASE_PG_HOST` | `postgres` si Metabase corre en Docker |
+| `METABASE_PG_DBNAME` | `eda_platform` |
+| `METABASE_PG_USER` | `eda` |
+| `METABASE_PG_PASSWORD` | `eda_local_dev` |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174` |
 
 ## Generar dataset IT de ejemplo
@@ -194,6 +198,11 @@ METABASE_USERNAME=analista@tfm.local
 METABASE_PASSWORD=TfmDemo2026!
 METABASE_DATABASE_NAME=TFM IT Analytics
 METABASE_DASHBOARD_NAME=Dashboard IT - Evidencias conversacionales
+METABASE_PG_HOST=tfm-analytics-db
+METABASE_PG_PORT=5432
+METABASE_PG_DBNAME=tfm_it
+METABASE_PG_USER=tfm
+METABASE_PG_PASSWORD=tfm
 ```
 
 Despues reiniciar la API:
@@ -220,7 +229,8 @@ bi_service_risk
 bi_selected_insights
 ```
 
-En Metabase, agregar una base de datos PostgreSQL con:
+El backend puede crear la conexion PostgreSQL en Metabase automaticamente con
+las variables `METABASE_PG_*`. Si se configura manualmente en Metabase, usar:
 
 | Campo | Valor |
 |-------|-------|
@@ -257,7 +267,7 @@ Ese boton:
 
 1. Publica las tablas `bi_*` desde DuckDB hacia PostgreSQL.
 2. Inicia sesion contra Metabase con `METABASE_USERNAME` y `METABASE_PASSWORD`.
-3. Busca la base `METABASE_DATABASE_NAME`.
+3. Busca o crea la base `METABASE_DATABASE_NAME`.
 4. Crea el dashboard `METABASE_DASHBOARD_NAME`.
 5. Agrega tarjetas para SLA, severidad, servicios, tiempos, clusters e insights seleccionados.
 
