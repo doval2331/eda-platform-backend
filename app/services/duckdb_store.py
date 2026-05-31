@@ -34,10 +34,28 @@ def init_duckdb() -> None:
                 outliers_count INTEGER,
                 silhouette DOUBLE,
                 davies_bouldin DOUBLE,
-                n_clusters INTEGER
+                n_clusters INTEGER,
+                calinski_harabasz DOUBLE,
+                ari DOUBLE,
+                nmi DOUBLE,
+                cluster_stability DOUBLE,
+                noise_pct DOUBLE
             )
             """
         )
+        registry_columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info('run_registry')").fetchall()
+        }
+        for column, sql_type in (
+            ("calinski_harabasz", "DOUBLE"),
+            ("ari", "DOUBLE"),
+            ("nmi", "DOUBLE"),
+            ("cluster_stability", "DOUBLE"),
+            ("noise_pct", "DOUBLE"),
+        ):
+            if column not in registry_columns:
+                con.execute(f"ALTER TABLE run_registry ADD COLUMN {column} {sql_type}")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS run_evidences (
@@ -138,6 +156,11 @@ REGISTRY_COLUMNS = [
     "silhouette",
     "davies_bouldin",
     "n_clusters",
+    "calinski_harabasz",
+    "ari",
+    "nmi",
+    "cluster_stability",
+    "noise_pct",
 ]
 
 EVIDENCE_COLUMNS = [
@@ -242,6 +265,11 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
                     if metrics.get("n_clusters") is not None
                     else None
                 ),
+                "calinski_harabasz": _metric_value(metrics, "calinski_harabasz"),
+                "ari": _metric_value(metrics, "ari"),
+                "nmi": _metric_value(metrics, "nmi"),
+                "cluster_stability": _metric_value(metrics, "cluster_stability"),
+                "noise_pct": _metric_value(metrics, "noise_pct"),
             }
         ]
     )

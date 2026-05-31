@@ -97,8 +97,11 @@ def save_run(db: Session, *, payload: dict) -> AnalysisRun:
 
 def run_to_detail(row: AnalysisRun) -> dict:
     result = json.loads(row.result_json)
-    sil = float(row.silhouette) if row.silhouette is not None else None
-    dbi = float(row.davies_bouldin) if row.davies_bouldin is not None else None
+    metrics = dict(result.get("metrics") or {})
+    if metrics.get("silhouette") is None and row.silhouette is not None:
+        metrics["silhouette"] = float(row.silhouette)
+    if metrics.get("davies_bouldin") is None and row.davies_bouldin is not None:
+        metrics["davies_bouldin"] = float(row.davies_bouldin)
     return {
         "id": row.id,
         "created_at": row.created_at,
@@ -107,9 +110,6 @@ def run_to_detail(row: AnalysisRun) -> dict:
         "seed": row.seed,
         "n_samples": row.n_samples,
         "outliers_count": row.outliers_count,
-        "metrics": {
-            "silhouette": sil,
-            "davies_bouldin": dbi,
-        },
+        "metrics": metrics,
         "result": result,
     }

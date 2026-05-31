@@ -78,6 +78,27 @@ Opcional para pruebas mas grandes:
 python scripts/generate_it_ops_dataset.py --n 50000 --output data/it_ops_synthetic_50000.csv
 ```
 
+## Esquema de incidencias y metricas
+
+El pipeline analiza incidencias IT (no cuentas cliente). Columnas de texto (`descripcion_corta`) y evaluacion (`segment`, `synthetic_segment`) quedan fuera del modelado; los segmentos sinteticos solo sirven para ARI/NMI posteriores.
+
+Documentacion completa: [`docs/dataset_schema.md`](docs/dataset_schema.md).
+
+Metricas devueltas por cada ejecucion (`metrics` en la respuesta):
+
+| Metrica | Descripcion |
+|---------|-------------|
+| `silhouette` | Cohesion/separacion en el espacio 2D |
+| `davies_bouldin` | Dispersion intra/inter cluster (menor es mejor) |
+| `calinski_harabasz` | Separacion en el espacio de features original |
+| `n_clusters` | Clusters HDBSCAN (sin ruido) |
+| `noise_pct` | Porcentaje de puntos marcados como ruido (-1) |
+| `ari` | Adjusted Rand Index vs segmento sintetico (si existe) |
+| `nmi` | Normalized Mutual Information vs segmento sintetico |
+| `cluster_stability` | Acuerdo ARI entre dos HDBSCAN con parametros ligeramente distintos |
+
+Las metricas se persisten en SQLite (`result_json`), DuckDB (`run_registry`) y, si BI esta activo, PostgreSQL (`bi_runs`).
+
 ## Ejecutar API
 
 Puerto local recomendado para este proyecto:
