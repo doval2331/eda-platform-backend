@@ -1,297 +1,513 @@
-# EDA Platform — Backend (FastAPI)
+# EDA Platform - Backend FastAPI
 
-
-
-API REST para análisis exploratorio: dataset IT Ops tabular, reducción (PCA, t-SNE, UMAP) y clustering HDBSCAN.
-
-
+API REST para el prototipo TFM de analisis exploratorio de datasets IT. Ejecuta carga de datos, reduccion dimensional, clustering, persistencia de resultados, exploracion conversacional y dashboard de insights seleccionados.
 
 ## Requisitos
 
+- Python 3.11 o superior. Recomendado: Python 3.12 estable.
+- Git.
+- Opcional: Docker Desktop, si se quiere usar PostgreSQL y Metabase para la capa BI.
 
+DuckDB no se instala como servidor. Se usa como libreria embebida de Python y queda instalado con `pip install -r requirements.txt`.
 
-- Python 3.11+
-
-
-
-## Instalación
-
-
-
-```bash
-
-cd eda-platform-backend
-
-python -m venv .venv
-
-.venv\Scripts\activate
-
-pip install -r requirements.txt
-
-copy .env.example .env
-
-```
-
-
-
-## 1. Generar dataset sintético IT Ops
-
-
-
-```bash
-
-python scripts/generate_it_ops_dataset.py
-
-# → data/it_ops_synthetic_10000.csv
-
-
-
-# Opcional: 50k para pruebas de rendimiento
-
-python scripts/generate_it_ops_dataset.py --n 50000 --output data/it_ops_synthetic_50000.csv
-
-```
-
-
-
-## 2. Notebook de experimentación (recomendado antes de la API)
-
-
-
-```bash
-
-jupyter notebook notebooks/01_it_ops_eda.ipynb
-
-```
-
-
-
-El notebook importa los mismos módulos que la API (`app/services/`), de modo que notebook y backend comparten lógica.
-
-### Google Colab
-
-1. Sube el proyecto (ZIP con `app/`, `scripts/`, `notebooks/`) o clona el repo.
-2. Abre `notebooks/01_it_ops_eda.ipynb` en Colab.
-3. Ejecuta **Setup Colab** → **Seleccionar o subir CSV** (`DATA_MODE = "upload"`) y el resto.
-4. Al final, **Exportar artefactos** genera `notebooks/artifacts/`:
-   - `pipeline_config.json` — la API lo lee automáticamente
-   - `fig_*.png`, `tabla_metricas_reduccion.csv`, `tabla_crosstab_segment_cluster.csv`
-5. En Colab se descarga un ZIP; descomprímelo en `notebooks/artifacts/` en tu PC.
-
-## 3. Usuario demo (login)
-
-```bash
-python scripts/seed_user.py
-# Email: analista@tfm.local (o DEMO_USER_EMAIL en .env)
-# Password: TfmDemo2026!
-```
-
-Configura `JWT_SECRET` en `.env` antes de producción.
-
-## 4. Ejecutar API
-
-
-
-```bash
-
-uvicorn app.main:app --reload --port 8000
-
-```
-
-
-
-Documentación: http://127.0.0.1:8000/docs
-
-
-
-## Endpoints
-
-
-
-| Método | Ruta | Descripción |
-
-|--------|------|-------------|
-
-| GET | `/health` | Estado del servicio |
-
-| POST | `/api/runs` | Ejecuta pipeline y persiste resultado |
-
-| GET | `/api/runs` | Lista ejecuciones |
-
-| GET | `/api/runs/{id}` | Detalle |
-
-
-
-### Ejemplo IT Ops (principal)
-
-
-
-```json
-
-{
-
-  "modality": "it_ops",
-
-  "reduction_method": "UMAP",
-
-  "seed": 42,
-
-  "n_samples": 2000
-
-}
-
-```
-
-
-
-Modalidades `texto`, `imagen`, `multimodal`: demo con vectores sintéticos legacy.
-
-
-
-## Estructura
-
-
-
-```
-
-scripts/generate_it_ops_dataset.py   # Generador CSV
-
-data/it_ops_synthetic_10000.csv      # Dataset (no versionado)
-
-notebooks/01_it_ops_eda.ipynb        # EDA + validación
-
-app/services/it_ops_preprocess.py    # Carga y features
-
-app/services/pipeline_core.py        # Reducción + HDBSCAN
-
-app/services/pipeline.py             # Orquestación por modalidad
-
-app/services/pipeline_config.py      # Lee notebooks/artifacts/pipeline_config.json
-
-notebooks/artifacts/                 # Figuras + JSON exportados desde Colab/Jupyter
-
-```
-
-Tras ejecutar el notebook, copia `pipeline_config.json` a `notebooks/artifacts/`; la API aplicará esos hiperparámetros.
-
-## Frontend
-
-
-
-```bash
-
-# Terminal 1
-
-uvicorn app.main:app --reload --port 8000
-
-
-
-# Terminal 2
-
-cd eda-platform-frontend
-
-npm run dev
-
-```
-
-
-
-## Variables de entorno
-
-
-
-| Variable | Default |
-
-|----------|---------|
-
-| `DATABASE_URL` | `sqlite:///./eda_platform.db` |
-
-| `DEFAULT_N_SAMPLES` | `2000` |
-
-| `IT_OPS_DATASET_PATH` | `data/it_ops_synthetic_10000.csv` |
-
-
-
-## Base de datos (PostgreSQL con Docker — opción B)
-
-Requisito: [Docker Desktop](https://www.docker.com/products/docker-desktop/) en ejecución.
-
-### Arranque rápido
-
-**Windows (CMD — sin política de ejecución):**
-
-```cmd
-cd eda-platform-backend
-scripts\start_db.bat
-```
-
-**Windows (PowerShell)** — si falla por *execution policy*, usa el `.bat` de arriba o:
+## Instalacion
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start_db.ps1
+cd "C:\Users\Marisol Altamiranda\eda-platform-backend"
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-**Linux / macOS:**
+Si el usuario demo todavia no existe:
 
-```bash
-chmod +x scripts/start_db.sh
-./scripts/start_db.sh
+```powershell
+python scripts/seed_user.py
 ```
 
-**Manual:**
+Credenciales demo:
 
-```bash
+- Email: `analista@tfm.local`
+- Password: `TfmDemo2026!`
+
+## Base de datos
+
+La solucion usa tres capas de persistencia cuando se usa la integracion BI completa:
+
+- `eda_platform.db`: SQLite por defecto para usuarios, login e historial de ejecuciones.
+- `data/eda_platform.duckdb`: DuckDB para resultados analiticos, evidencias, clusters e insights seleccionados.
+- PostgreSQL: capa BI `bi_*` para que Metabase consuma datos con su driver oficial.
+
+No hay que levantar DuckDB manualmente. El archivo se crea automaticamente cuando arranca la API o cuando se ejecuta el pipeline.
+
+Variables principales en `.env`:
+
+| Variable | Valor local recomendado |
+|----------|--------------------------|
+| `DATABASE_URL` | `sqlite:///./eda_platform.db` |
+| `DUCKDB_PATH` | `data/eda_platform.duckdb` |
+| `IT_OPS_DATASET_PATH` | `data/it_ops_synthetic_10000.csv` |
+| `DEFAULT_N_SAMPLES` | `2000` |
+| `BI_SYNC_ENABLED` | `false` sin Docker, `true` con `.env.docker.example` |
+| `BI_DATABASE_URL` | `postgresql+psycopg2://eda:eda_local_dev@127.0.0.1:5432/eda_platform` |
+| `METABASE_URL` | `http://localhost:3000` |
+| `METABASE_USERNAME` | usuario admin de Metabase, por ejemplo `analista@tfm.local` |
+| `METABASE_PASSWORD` | password del usuario admin de Metabase |
+| `METABASE_DATABASE_NAME` | `TFM IT Analytics` |
+| `METABASE_DASHBOARD_NAME` | `Dashboard IT - Evidencias conversacionales` |
+| `LLM_ENABLED` | `false` por defecto; `true` para activar explicacion asistida por LLM |
+| `LLM_PROVIDER` | `openai_compatible` |
+| `LLM_API_BASE` | `https://api.openai.com/v1` o endpoint compatible |
+| `LLM_API_KEY` | API key del proveedor LLM |
+| `LLM_MODEL` | modelo compatible; para Ollama local se usa `qwen2.5:1.5b`, para OpenAI puede usarse `gpt-4.1-mini` |
+| `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174` |
+
+## Generar dataset IT de ejemplo
+
+Mientras no haya dataset real de la empresa, se puede generar un dataset sintetico IT Ops:
+
+```powershell
+python scripts/generate_it_ops_dataset.py
+```
+
+Salida esperada:
+
+```text
+data/it_ops_synthetic_10000.csv
+```
+
+Opcional para pruebas mas grandes:
+
+```powershell
+python scripts/generate_it_ops_dataset.py --n 50000 --output data/it_ops_synthetic_50000.csv
+```
+
+## Generar dataset sintetico de incidencias IT
+
+Para probar la propuesta de clustering con incidencias individuales:
+
+```powershell
+python scripts/generate_it_incidents_dataset.py
+```
+
+Salida esperada:
+
+```text
+data/it_incidents_synthetic_2000.csv
+```
+
+Tambien se puede cambiar el tamano:
+
+```powershell
+python scripts/generate_it_incidents_dataset.py --n 5000 --output data/it_incidents_synthetic_5000.csv
+```
+
+Columnas principales:
+
+```text
+incident_id
+categoria
+subcategoria
+prioridad
+servicio_afectado
+canal_entrada
+tiempo_resolucion_horas
+sla_incumplido
+reaperturas
+escalados
+satisfaccion_usuario
+coste_estimado
+descripcion_corta
+causa_raiz_simulada
+synthetic_segment
+```
+
+Segmentos simulados incluidos:
+
+```text
+Incidencias simples de bajo impacto
+Incidencias criticas recurrentes
+Incidencias complejas de larga resolucion
+Incidencias asociadas a cambios
+Incidencias de seguridad
+Casos anomalos
+```
+
+`synthetic_segment` se incluye solo para evaluacion posterior. El perfilador tabular lo excluye del modelado por defecto para evitar fuga de informacion.
+
+Para probarlo en la interfaz:
+
+1. Levantar backend y frontend.
+2. Ir a `Analisis exploratorio`.
+3. Subir `data/it_incidents_synthetic_2000.csv`.
+4. Usar modalidad `tabular`.
+5. Verificar que `incident_id`, `descripcion_corta` y `synthetic_segment` queden excluidas del modelado.
+6. Ejecutar el pipeline.
+7. Probar el chat con preguntas sobre SLA, prioridades, causas raiz, anomalias y clusters criticos.
+
+## Ejecutar API
+
+Puerto local recomendado para este proyecto:
+
+```powershell
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Documentacion Swagger:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+Health check:
+
+```text
+http://127.0.0.1:8000/health
+```
+
+Si preferis usar otro puerto, tambien funciona, pero el frontend debe apuntar al mismo puerto.
+
+## Endpoints principales
+
+| Metodo | Ruta | Descripcion |
+|--------|------|-------------|
+| `GET` | `/health` | Estado del servicio |
+| `POST` | `/api/auth/login` | Login JWT |
+| `POST` | `/api/datasets/upload` | Carga CSV del usuario |
+| `GET` | `/api/datasets/{dataset_id}` | Perfil del dataset cargado |
+| `POST` | `/api/runs` | Ejecuta pipeline y persiste resultado |
+| `GET` | `/api/runs` | Lista ejecuciones |
+| `GET` | `/api/runs/{id}` | Detalle de una ejecucion |
+| `POST` | `/api/runs/{id}/chat` | Exploracion conversacional del run |
+| `POST` | `/api/runs/{id}/insights/select` | Guarda un insight para dashboard |
+| `GET` | `/api/conversation-dashboard` | Devuelve dashboard conversacional |
+| `GET` | `/api/metabase/status` | Estado de la capa BI/Metabase |
+| `POST` | `/api/metabase/dashboard` | Publica tablas BI y crea dashboard base en Metabase |
+| `POST` | `/api/bi-sync` | Publica todas las tablas BI en PostgreSQL |
+| `POST` | `/api/runs/{id}/bi-sync` | Publica un run en PostgreSQL BI |
+
+## Ejemplo de ejecucion IT Ops
+
+```json
+{
+  "modality": "it_ops",
+  "reduction_method": "UMAP",
+  "seed": 42,
+  "n_samples": 2000
+}
+```
+
+Tambien se puede usar modalidad `tabular` subiendo un CSV desde el frontend.
+
+## Exploracion conversacional y agente LLM
+
+El chat funciona como agente controlado por herramientas analiticas internas. Por defecto es local y guiado: no se conecta a un chatbot externo ni envia datos sensibles a internet.
+
+Flujo:
+
+1. El usuario ejecuta el pipeline.
+2. El backend persiste evidencias, clusters y metricas en DuckDB.
+3. El usuario pregunta desde el frontend: por ejemplo `que servicios incumplen mas SLA`.
+4. El backend ejecuta herramientas internas como `analizar_sla`, `analizar_clusters`, `analizar_anomalias`, `analizar_causas_raiz` o `analizar_prioridades`.
+5. Las herramientas devuelven resumenes agregados e insights candidatos.
+6. Si el usuario pregunta por decisiones, el backend agrega una herramienta `alternativas_decision`, que compara SLA, demora, riesgo, volumen, causas y anomalias para generar opciones de priorizacion.
+7. Si `LLM_ENABLED=true`, el backend envia solo esos resumenes agregados al LLM para redactar una explicacion simple y sugerir alternativas interpretativas.
+8. Si `LLM_ENABLED=false`, se usa la respuesta local por reglas.
+9. El usuario selecciona insights o alternativas.
+10. Los insights quedan disponibles en `/api/conversation-dashboard`.
+11. Si `BI_SYNC_ENABLED=true`, el backend publica tablas `bi_*` en PostgreSQL para Metabase.
+
+Activacion opcional del LLM:
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compatible
+LLM_API_BASE=https://api.openai.com/v1
+LLM_API_KEY=tu_api_key
+LLM_MODEL=gpt-4.1-mini
+```
+
+Tambien puede usarse un servidor local compatible con OpenAI, por ejemplo Ollama o LM Studio, cambiando `LLM_API_BASE` y `LLM_MODEL`.
+
+Configuracion local con Ollama:
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compatible
+LLM_API_BASE=http://127.0.0.1:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=qwen2.5:1.5b
+LLM_TIMEOUT_SECONDS=120
+```
+
+Instalacion y modelo local:
+
+```powershell
+winget install --id Ollama.Ollama -e --silent --accept-package-agreements --accept-source-agreements
+ollama pull qwen2.5:1.5b
+```
+
+El LLM no consulta DuckDB directamente, no recibe filas completas, no calcula clusters y no toma decisiones automaticamente. Solo traduce resultados agregados generados por el backend y ayuda a presentar alternativas de priorizacion para que el usuario las evalue.
+
+## Metabase BI con DuckDB como base principal
+
+La arquitectura BI es:
+
+```text
+FastAPI / pipeline
+  -> DuckDB (base analitica principal)
+  -> PostgreSQL (tablas bi_* para serving BI)
+  -> Metabase (dashboards con driver oficial PostgreSQL)
+```
+
+DuckDB sigue siendo la fuente analitica principal. PostgreSQL se usa como capa de publicacion porque Metabase se conecta de forma oficial y estable a PostgreSQL.
+
+Para levantar PostgreSQL + Metabase:
+
+```powershell
 docker compose up -d
-copy .env.docker.example .env    # Windows: Copy-Item .env.docker.example .env
+Copy-Item .env.docker.example .env
 python scripts/wait_for_db.py
 python scripts/seed_user.py
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### DBeaver
+Si ya existen los contenedores locales del TFM:
+
+```text
+tfm-analytics-db  # PostgreSQL en 5432
+tfm-metabase      # Metabase en 3000
+```
+
+levantar ambos:
+
+```powershell
+docker start tfm-analytics-db
+docker start tfm-metabase
+```
+
+y configurar `.env` del backend asi:
+
+```env
+BI_SYNC_ENABLED=true
+BI_DATABASE_URL=postgresql+psycopg2://tfm:tfm@127.0.0.1:5432/tfm_it
+METABASE_URL=http://localhost:3000
+METABASE_DASHBOARD_URL=
+METABASE_USERNAME=analista@tfm.local
+METABASE_PASSWORD=TfmDemo2026!
+METABASE_DATABASE_NAME=TFM IT Analytics
+METABASE_DASHBOARD_NAME=Dashboard IT - Evidencias conversacionales
+```
+
+Despues reiniciar la API:
+
+```powershell
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+URLs:
+
+```text
+API:      http://127.0.0.1:8000
+Metabase: http://localhost:3000
+```
+
+Tablas publicadas para Metabase:
+
+```text
+bi_runs
+bi_evidences
+bi_cluster_summary
+bi_sla_by_category
+bi_service_risk
+bi_selected_insights
+```
+
+En Metabase, agregar una base de datos PostgreSQL con:
 
 | Campo | Valor |
-|--------|--------|
+|-------|-------|
+| Host | `postgres` si Metabase corre en Docker, `127.0.0.1` desde fuera de Docker |
+| Puerto | `5432` |
+| Base de datos | `eda_platform` |
+| Usuario | `eda` |
+| Password | `eda_local_dev` |
+
+Para los contenedores locales `tfm-*`, usar:
+
+| Campo | Valor |
+|-------|-------|
+| Host | `tfm-analytics-db` desde Metabase Docker, `127.0.0.1` desde fuera de Docker |
+| Puerto | `5432` |
+| Base de datos | `tfm_it` |
+| Usuario | `tfm` |
+| Password | `tfm` |
+
+Filtros recomendados en dashboards:
+
+```text
+run_id
+cluster_label
+category
+severity
+affected_service
+```
+
+### Crear dashboard automatico en Metabase
+
+La pantalla React `Metabase BI` incluye el boton `Crear dashboard en Metabase`.
+Ese boton:
+
+1. Publica las tablas `bi_*` desde DuckDB hacia PostgreSQL.
+2. Inicia sesion contra Metabase con `METABASE_USERNAME` y `METABASE_PASSWORD`.
+3. Busca la base `METABASE_DATABASE_NAME`.
+4. Crea el dashboard `METABASE_DASHBOARD_NAME`.
+5. Agrega tarjetas para SLA, severidad, servicios, tiempos, clusters e insights seleccionados.
+
+Tambien se puede crear desde API:
+
+```powershell
+# Requiere token Bearer de login
+POST http://127.0.0.1:8000/api/metabase/dashboard
+```
+
+La respuesta devuelve `dashboard_url`. Si queres dejar un dashboard fijo como acceso directo, copia esa URL en `.env`:
+
+```env
+METABASE_DASHBOARD_URL=http://localhost:3000/dashboard/ID_DEL_DASHBOARD
+```
+
+Si el volumen de PostgreSQL ya existia antes de agregar Metabase y falla porque no existe la base `metabase`, crearla una vez:
+
+```powershell
+docker compose exec postgres psql -U eda -d eda_platform -c "CREATE DATABASE metabase OWNER eda;"
+```
+
+### Publicar datos para Metabase
+
+Desde la app React, entrar a `Metabase BI` y presionar `Publicar tablas BI`.
+
+Tambien se puede publicar desde API:
+
+```powershell
+# Requiere token Bearer de login
+POST http://127.0.0.1:8000/api/bi-sync
+POST http://127.0.0.1:8000/api/runs/{run_id}/bi-sync
+```
+
+Estado esperado:
+
+```json
+{
+  "enabled": true,
+  "metabase_url": "http://localhost:3000",
+  "postgres_status": "ok",
+  "detail": "PostgreSQL BI disponible"
+}
+```
+
+### Troubleshooting Metabase
+
+Si `http://localhost:3000` muestra `ERR_CONNECTION_REFUSED`, revisar que el contenedor este corriendo:
+
+```powershell
+docker ps -a --filter "name=tfm-metabase"
+docker start tfm-metabase
+```
+
+Metabase puede tardar varios minutos la primera vez o despues de una actualizacion porque migra su base interna H2. Revisar logs:
+
+```powershell
+docker logs --tail 120 tfm-metabase
+```
+
+Cuando termine de iniciar, `http://localhost:3000` debe responder.
+
+Si la pantalla React `Metabase BI` muestra `Not Found`, cerrar sesion, volver a iniciar sesion y refrescar con `Ctrl + F5`. En desarrollo el frontend usa el proxy de Vite hacia `http://127.0.0.1:8000`.
+
+### Backup para mover a otra laptop
+
+Exportar PostgreSQL:
+
+```powershell
+docker exec tfm-analytics-db pg_dump -U tfm -Fc -d tfm_it -f /tmp/tfm_it.dump
+docker cp tfm-analytics-db:/tmp/tfm_it.dump "C:\tfm-backup\tfm_it.dump"
+```
+
+Exportar Metabase H2:
+
+```powershell
+docker run --rm `
+  -v "tfm2_metabase-data:/metabase-data" `
+  -v "C:\tfm-backup:/backup" `
+  alpine sh -c "tar czf /backup/metabase-data.tar.gz -C /metabase-data ."
+```
+
+Copiar tambien DuckDB si se quiere conservar el estado analitico local:
+
+```powershell
+Copy-Item "data\eda_platform.duckdb" "C:\tfm-backup\eda_platform.duckdb"
+```
+
+Archivos esperados:
+
+```text
+C:\tfm-backup\tfm_it.dump
+C:\tfm-backup\metabase-data.tar.gz
+C:\tfm-backup\eda_platform.duckdb
+```
+
+## Notebook de experimentacion
+
+```powershell
+jupyter notebook notebooks/01_it_ops_eda.ipynb
+```
+
+El notebook reutiliza modulos de `app/services/`, de modo que notebook y API comparten logica.
+
+## PostgreSQL con Docker opcional
+
+SQLite es suficiente para pruebas locales sin BI. Si se quiere PostgreSQL para usuarios, historial y Metabase:
+
+```powershell
+docker compose up -d
+Copy-Item .env.docker.example .env
+python scripts/wait_for_db.py
+python scripts/seed_user.py
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Datos DBeaver:
+
+| Campo | Valor |
+|-------|-------|
 | Host | `127.0.0.1` |
 | Puerto | `5432` |
 | Base de datos | `eda_platform` |
 | Usuario | `eda` |
-| Contraseña | `eda_local_dev` (la de `.env.docker.example`) |
+| Password | `eda_local_dev` |
 
-Tras login en la app y ejecutar el pipeline, revisa las tablas `users` y `analysis_runs`.
+## Estructura relevante
 
-### Comandos útiles
-
-```bash
-docker compose ps
-docker compose logs -f postgres
-docker compose down          # parar
-docker compose down -v       # parar y borrar datos (volumen)
+```text
+app/api/routes.py                  # Endpoints FastAPI
+app/services/pipeline.py           # Orquestacion del pipeline
+app/services/pipeline_core.py      # Reduccion dimensional + HDBSCAN
+app/services/duckdb_store.py       # Persistencia analitica DuckDB
+app/services/conversation.py       # Motor conversacional guiado
+app/services/dataset_store.py      # Carga/perfilado de CSV
+scripts/generate_it_ops_dataset.py # Generador sintetico IT Ops
+scripts/seed_user.py               # Usuario demo
+data/                              # CSV, SQLite y DuckDB locales
 ```
 
-### SQLite (sin Docker)
+## Checklist para otro ambiente
 
-Por defecto en `.env.example`: `sqlite:///./eda_platform.db`. Adecuado solo para pruebas locales sin DBeaver/Postgres.
-
-## Despliegue (back + front + Postgres)
-
-Misma idea que en local: API con `DATABASE_URL` apuntando a Postgres gestionado.
-
-| Pieza | Sugerencia |
-|--------|------------|
-| **PostgreSQL** | [Neon](https://neon.tech) o [Supabase](https://supabase.com) (gratis) — copia la URL en `DATABASE_URL` |
-| **Backend** | [Render](https://render.com) / [Railway](https://railway.app) — repo FastAPI, `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| **Frontend** | [Vercel](https://vercel.com) — build con `VITE_API_BASE=https://tu-api.onrender.com` |
-
-Checklist producción:
-
-1. `DATABASE_URL` = Postgres en la nube (no SQLite).
-2. `JWT_SECRET` aleatorio y distinto al de desarrollo.
-3. `CORS_ORIGINS` = URL exacta del frontend desplegado.
-4. CSV `data/it_ops_synthetic_10000.csv` disponible en el servidor (o regenerar con el script).
-5. Tras deploy: `python scripts/wait_for_db.py && python scripts/seed_user.py`.
-6. Frontend: `npm run build` con `VITE_API_BASE` apuntando a la API pública.
-
-En un VPS puedes reutilizar el mismo `docker-compose.yml` (solo servicio `postgres`) o levantar Postgres + API con Docker.
-
-
+1. Crear `.venv`.
+2. Instalar `requirements.txt`.
+3. Copiar `.env.example` a `.env`.
+4. Generar dataset sintetico o cargar CSV desde el frontend.
+5. Ejecutar `python scripts/seed_user.py`.
+6. Levantar API en `127.0.0.1:8000`.
+7. Levantar frontend apuntando al mismo puerto.

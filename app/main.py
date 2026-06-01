@@ -7,11 +7,15 @@ from app.api.auth_routes import router as auth_router
 from app.api.routes import router
 from app.config import get_settings
 from app.db import init_db
+from app.services.bi_postgres_store import get_bi_status
+from app.services.duckdb_store import init_duckdb
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    init_duckdb()
+    get_bi_status()
     yield
 
 
