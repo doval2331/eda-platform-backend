@@ -9,13 +9,14 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from app.schemas import EvidenceMetadata, PipelineResult
+from app.schemas import EvidenceMetadata, PipelineMetrics, PipelineResult
 from app.services.dataset_store import get_dataset_csv_path, get_dataset_meta, meta_to_profile
 from app.services.it_ops_preprocess import (
     build_record_preview,
     dataframe_to_features,
     load_it_ops_dataframe,
 )
+from app.services.incidents_schema import default_exclude_columns, reference_segment_series
 from app.services.tabular_preprocess import (
     build_row_preview,
     dataframe_to_features_generic,
@@ -67,6 +68,30 @@ def _cluster_count(labels: np.ndarray) -> int:
     return len({int(x) for x in labels.tolist() if int(x) >= 0})
 
 
+def _pipeline_metrics(
+    *,
+    X_scaled: np.ndarray,
+    X_2d: np.ndarray,
+    cluster_labels: np.ndarray,
+    cfg: dict,
+    df: pd.DataFrame | None,
+    n_samples: int,
+) -> PipelineMetrics:
+    reference = None
+    if df is not None:
+        ref_series = reference_segment_series(df)
+        if ref_series is not None:
+            reference = ref_series.to_numpy()
+    return compute_metrics(
+        X_2d,
+        cluster_labels,
+        X_features=X_scaled,
+        reference_labels=reference,
+        hdbscan_config=cfg,
+        n_samples=n_samples,
+    )
+
+
 def _num_or_none(val) -> float | None:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
@@ -112,30 +137,40 @@ def _build_it_ops_metadata(
         critical_incidents = _num_or_none(row.get("critical_incidents"))
         avg_resolution_hours = _num_or_none(row.get("avg_resolution_hours"))
         sla_breach_rate = _num_or_none(row.get("sla_breach_rate"))
-        service_line = _str_or_none(row.get("service_line"))
-        sector = _str_or_none(row.get("sector"))
-        support_channel = _str_or_none(row.get("support_channel"))
+        service_line = _str_or_none(row.get("service_line") or row.get("servicio_afectado"))
+        sector = _str_or_none(row.get("sector") or row.get("categoria"))
+        support_channel = _str_or_none(row.get("support_channel") or row.get("canal_entrada"))
+        segment = _str_or_none(row.get("segment") or row.get("synthetic_segment"))
+        short_description = _str_or_none(row.get("descripcion_corta"))
+        root_cause = _str_or_none(row.get("causa_raiz_simulada"))
 
         items.append(
             EvidenceMetadata(
-                id=str(row.get("client_id", f"C{i + 1:05d}")),
+                id=str(row.get("incident_id") or row.get("client_id", f"INC{i + 1:05d}")),
                 preview=preview,
                 source="it_ops",
                 sector=sector,
                 service_line=service_line,
                 support_channel=support_channel,
-                segment=_str_or_none(row.get("segment")),
+                segment=segment,
+                synthetic_segment=segment,
                 category=sector,
+                subcategory=_str_or_none(row.get("subcategoria")),
+                priority=_str_or_none(row.get("prioridad")),
                 severity=_severity_from_risk(risk, critical_incidents),
                 status="active",
                 assignment_group=support_channel,
                 affected_service=service_line,
+                short_description=short_description,
+                root_cause_simulated=root_cause,
                 monthly_tickets=_num_or_none(row.get("monthly_tickets")),
                 critical_incidents=critical_incidents,
                 avg_resolution_hours=avg_resolution_hours,
                 resolution_minutes=(
                     avg_resolution_hours * 60 if avg_resolution_hours is not None else None
                 ),
+                reopenings=_num_or_none(row.get("reaperturas") or row.get("reopen_rate")),
+                escalations=_num_or_none(row.get("escalados") or row.get("escalation_rate")),
                 sla_breach_rate=sla_breach_rate,
                 sla_breached=(
                     bool(sla_breach_rate >= 0.12) if sla_breach_rate is not None else None
@@ -145,6 +180,7 @@ def _build_it_ops_metadata(
                 security_incidents=_num_or_none(row.get("security_incidents")),
                 downtime_hours=_num_or_none(row.get("downtime_hours")),
                 customer_satisfaction=_num_or_none(row.get("customer_satisfaction")),
+                estimated_cost=_num_or_none(row.get("coste_estimado") or row.get("contract_value")),
             )
         )
     return items
@@ -209,7 +245,9 @@ def run_pipeline(
             profile,
             numeric_columns=numeric_columns,
             categorical_columns=categorical_columns,
-            exclude_columns=exclude_columns,
+            exclude_columns=list(
+                dict.fromkeys([*(exclude_columns or []), *default_exclude_columns()])
+            ),
         )
         X, _ = dataframe_to_features_generic(df, num_cols, cat_cols)
         cfg = load_pipeline_config()
@@ -217,8 +255,13 @@ def run_pipeline(
         X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
         cluster_labels = cluster_hdbscan(X_2d, config=cfg)
         outliers_count = int(np.sum(cluster_labels == -1))
-        metrics = compute_metrics(X_2d, cluster_labels).model_copy(
-            update={"n_clusters": _cluster_count(cluster_labels)}
+        metrics = _pipeline_metrics(
+            X_scaled=X_scaled,
+            X_2d=X_2d,
+            cluster_labels=cluster_labels,
+            cfg=cfg,
+            df=df,
+            n_samples=len(df),
         )
         id_col = id_column or profile.suggested_id_column
         metadata = _build_tabular_metadata(df, cluster_labels, id_col)
@@ -236,15 +279,19 @@ def run_pipeline(
             n_samples=n_samples,
             seed=effective_seed,
         )
-        X, _, _meta = dataframe_to_features(df)
-        # Features ya escaladas por columna; escalado global adicional opcional
+        X, _, _meta, _groups = dataframe_to_features(df)
         cfg = load_pipeline_config()
         X_scaled = scale_features(X)
         X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
         cluster_labels = cluster_hdbscan(X_2d, config=cfg)
         outliers_count = int(np.sum(cluster_labels == -1))
-        metrics = compute_metrics(X_2d, cluster_labels).model_copy(
-            update={"n_clusters": _cluster_count(cluster_labels)}
+        metrics = _pipeline_metrics(
+            X_scaled=X_scaled,
+            X_2d=X_2d,
+            cluster_labels=cluster_labels,
+            cfg=cfg,
+            df=df,
+            n_samples=len(df),
         )
         metadata = _build_it_ops_metadata(df, cluster_labels)
         return PipelineResult(
@@ -267,8 +314,13 @@ def run_pipeline(
     X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
     cluster_labels = cluster_hdbscan(X_2d, config=cfg)
     outliers_count = int(np.sum(cluster_labels == -1))
-    metrics = compute_metrics(X_2d, cluster_labels).model_copy(
-        update={"n_clusters": _cluster_count(cluster_labels)}
+    metrics = _pipeline_metrics(
+        X_scaled=X_scaled,
+        X_2d=X_2d,
+        cluster_labels=cluster_labels,
+        cfg=cfg,
+        df=None,
+        n_samples=n_samples,
     )
     metadata = _build_legacy_metadata(
         true_labels, cluster_labels, modality, effective_seed
