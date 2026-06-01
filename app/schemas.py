@@ -11,6 +11,21 @@ class EvidenceMetadata(BaseModel):
     id: str
     preview: str
     source: Modality
+    incident_id: str | None = None
+    categoria: str | None = None
+    subcategoria: str | None = None
+    prioridad: str | None = None
+    servicio_afectado: str | None = None
+    canal_entrada: str | None = None
+    tiempo_resolucion_horas: float | None = None
+    sla_incumplido: bool | None = None
+    reaperturas: float | None = None
+    escalados: float | None = None
+    satisfaccion_usuario: float | None = None
+    coste_estimado: float | None = None
+    descripcion_corta: str | None = None
+    causa_raiz_simulada: str | None = None
+    synthetic_segment: str | None = None
     sector: str | None = None
     service_line: str | None = None
     support_channel: str | None = None
@@ -143,6 +158,9 @@ class ChatResponse(BaseModel):
     answer: str
     suggested_questions: list[str] = Field(default_factory=list)
     insights: list[InsightCandidate] = Field(default_factory=list)
+    llm_used: bool = False
+    llm_mode: str = "rules"
+    llm_detail: str | None = None
 
 
 class InsightSelectionBody(BaseModel):

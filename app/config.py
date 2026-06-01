@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     metabase_password: str = ""
     metabase_database_name: str = "TFM IT Analytics"
     metabase_dashboard_name: str = "Dashboard IT - Evidencias conversacionales"
+    llm_enabled: bool = False
+    llm_provider: str = "openai_compatible"
+    llm_api_base: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4.1-mini"
+    llm_timeout_seconds: int = 20
     metabase_pg_host: str = "postgres"
     metabase_pg_port: int = 5432
     metabase_pg_dbname: str = "eda_platform"

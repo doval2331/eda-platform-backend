@@ -56,6 +56,11 @@ Variables principales en `.env`:
 | `METABASE_PASSWORD` | password del usuario admin de Metabase |
 | `METABASE_DATABASE_NAME` | `TFM IT Analytics` |
 | `METABASE_DASHBOARD_NAME` | `Dashboard IT - Evidencias conversacionales` |
+| `LLM_ENABLED` | `false` por defecto; `true` para activar explicacion asistida por LLM |
+| `LLM_PROVIDER` | `openai_compatible` |
+| `LLM_API_BASE` | `https://api.openai.com/v1` o endpoint compatible |
+| `LLM_API_KEY` | API key del proveedor LLM |
+| `LLM_MODEL` | modelo compatible; para Ollama local se usa `qwen2.5:1.5b`, para OpenAI puede usarse `gpt-4.1-mini` |
 | `METABASE_PG_HOST` | `postgres` si Metabase corre en Docker |
 | `METABASE_PG_DBNAME` | `eda_platform` |
 | `METABASE_PG_USER` | `eda` |
@@ -82,6 +87,68 @@ Opcional para pruebas mas grandes:
 python scripts/generate_it_ops_dataset.py --n 50000 --output data/it_ops_synthetic_50000.csv
 ```
 
+## Generar dataset sintetico de incidencias IT
+
+Para probar la propuesta de clustering con incidencias individuales:
+
+```powershell
+python scripts/generate_it_incidents_dataset.py
+```
+
+Salida esperada:
+
+```text
+data/it_incidents_synthetic_2000.csv
+```
+
+Tambien se puede cambiar el tamano:
+
+```powershell
+python scripts/generate_it_incidents_dataset.py --n 5000 --output data/it_incidents_synthetic_5000.csv
+```
+
+Columnas principales:
+
+```text
+incident_id
+categoria
+subcategoria
+prioridad
+servicio_afectado
+canal_entrada
+tiempo_resolucion_horas
+sla_incumplido
+reaperturas
+escalados
+satisfaccion_usuario
+coste_estimado
+descripcion_corta
+causa_raiz_simulada
+synthetic_segment
+```
+
+Segmentos simulados incluidos:
+
+```text
+Incidencias simples de bajo impacto
+Incidencias criticas recurrentes
+Incidencias complejas de larga resolucion
+Incidencias asociadas a cambios
+Incidencias de seguridad
+Casos anomalos
+```
+
+`synthetic_segment` se incluye solo para evaluacion posterior. El perfilador tabular lo excluye del modelado por defecto para evitar fuga de informacion.
+
+Para probarlo en la interfaz:
+
+1. Levantar backend y frontend.
+2. Ir a `Analisis exploratorio`.
+3. Subir `data/it_incidents_synthetic_2000.csv`.
+4. Usar modalidad `tabular`.
+5. Verificar que `incident_id`, `descripcion_corta` y `synthetic_segment` queden excluidas del modelado.
+6. Ejecutar el pipeline.
+7. Probar el chat con preguntas sobre SLA, prioridades, causas raiz, anomalias y clusters criticos.
 ## Esquema de incidencias y metricas
 
 El pipeline analiza incidencias IT (no cuentas cliente). Columnas de texto (`descripcion_corta`) y evaluacion (`segment`, `synthetic_segment`) quedan fuera del modelado; los segmentos sinteticos solo sirven para ARI/NMI posteriores.
@@ -157,19 +224,55 @@ Si preferis usar otro puerto, tambien funciona, pero el frontend debe apuntar al
 
 Tambien se puede usar modalidad `tabular` subiendo un CSV desde el frontend.
 
-## Exploracion conversacional
+## Exploracion conversacional y agente LLM
 
-El chat implementado es local y guiado. No se conecta a un chatbot externo ni envia datos sensibles a internet.
+El chat funciona como agente controlado por herramientas analiticas internas. Por defecto es local y guiado: no se conecta a un chatbot externo ni envia datos sensibles a internet.
 
 Flujo:
 
 1. El usuario ejecuta el pipeline.
 2. El backend persiste evidencias, clusters y metricas en DuckDB.
-3. El usuario pregunta desde el frontend: por ejemplo `que grupos incumplen SLA`.
-4. El backend responde con explicacion e insights candidatos.
-5. El usuario selecciona insights.
-6. Los insights quedan disponibles en `/api/conversation-dashboard`.
-7. Si `BI_SYNC_ENABLED=true`, el backend publica tablas `bi_*` en PostgreSQL para Metabase.
+3. El usuario pregunta desde el frontend: por ejemplo `que servicios incumplen mas SLA`.
+4. El backend ejecuta herramientas internas como `analizar_sla`, `analizar_clusters`, `analizar_anomalias`, `analizar_causas_raiz` o `analizar_prioridades`.
+5. Las herramientas devuelven resumenes agregados e insights candidatos.
+6. Si el usuario pregunta por decisiones, el backend agrega una herramienta `alternativas_decision`, que compara SLA, demora, riesgo, volumen, causas y anomalias para generar opciones de priorizacion.
+7. Si `LLM_ENABLED=true`, el backend envia solo esos resumenes agregados al LLM para redactar una explicacion simple y sugerir alternativas interpretativas.
+8. Si `LLM_ENABLED=false`, se usa la respuesta local por reglas.
+9. El usuario selecciona insights o alternativas.
+10. Los insights quedan disponibles en `/api/conversation-dashboard`.
+11. Si `BI_SYNC_ENABLED=true`, el backend publica tablas `bi_*` en PostgreSQL para Metabase.
+
+Activacion opcional del LLM:
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compatible
+LLM_API_BASE=https://api.openai.com/v1
+LLM_API_KEY=tu_api_key
+LLM_MODEL=gpt-4.1-mini
+```
+
+Tambien puede usarse un servidor local compatible con OpenAI, por ejemplo Ollama o LM Studio, cambiando `LLM_API_BASE` y `LLM_MODEL`.
+
+Configuracion local con Ollama:
+
+```env
+LLM_ENABLED=true
+LLM_PROVIDER=openai_compatible
+LLM_API_BASE=http://127.0.0.1:11434/v1
+LLM_API_KEY=ollama
+LLM_MODEL=qwen2.5:1.5b
+LLM_TIMEOUT_SECONDS=120
+```
+
+Instalacion y modelo local:
+
+```powershell
+winget install --id Ollama.Ollama -e --silent --accept-package-agreements --accept-source-agreements
+ollama pull qwen2.5:1.5b
+```
+
+El LLM no consulta DuckDB directamente, no recibe filas completas, no calcula clusters y no toma decisiones automaticamente. Solo traduce resultados agregados generados por el backend y ayuda a presentar alternativas de priorizacion para que el usuario las evalue.
 
 ## Metabase BI con DuckDB como base principal
 

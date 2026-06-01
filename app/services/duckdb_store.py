@@ -67,6 +67,21 @@ def init_duckdb() -> None:
                 x DOUBLE,
                 y DOUBLE,
                 cluster_label INTEGER,
+                incident_id VARCHAR,
+                categoria VARCHAR,
+                subcategoria VARCHAR,
+                prioridad VARCHAR,
+                servicio_afectado VARCHAR,
+                canal_entrada VARCHAR,
+                tiempo_resolucion_horas DOUBLE,
+                sla_incumplido BOOLEAN,
+                reaperturas DOUBLE,
+                escalados DOUBLE,
+                satisfaccion_usuario DOUBLE,
+                coste_estimado DOUBLE,
+                descripcion_corta VARCHAR,
+                causa_raiz_simulada VARCHAR,
+                synthetic_segment VARCHAR,
                 sector VARCHAR,
                 service_line VARCHAR,
                 support_channel VARCHAR,
@@ -90,6 +105,30 @@ def init_duckdb() -> None:
             )
             """
         )
+        evidence_columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info('run_evidences')").fetchall()
+        }
+        incident_columns = {
+            "incident_id": "VARCHAR",
+            "categoria": "VARCHAR",
+            "subcategoria": "VARCHAR",
+            "prioridad": "VARCHAR",
+            "servicio_afectado": "VARCHAR",
+            "canal_entrada": "VARCHAR",
+            "tiempo_resolucion_horas": "DOUBLE",
+            "sla_incumplido": "BOOLEAN",
+            "reaperturas": "DOUBLE",
+            "escalados": "DOUBLE",
+            "satisfaccion_usuario": "DOUBLE",
+            "coste_estimado": "DOUBLE",
+            "descripcion_corta": "VARCHAR",
+            "causa_raiz_simulada": "VARCHAR",
+            "synthetic_segment": "VARCHAR",
+        }
+        for column, dtype in incident_columns.items():
+            if column not in evidence_columns:
+                con.execute(f"ALTER TABLE run_evidences ADD COLUMN {column} {dtype}")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS selected_insights (
@@ -120,8 +159,17 @@ def init_duckdb() -> None:
                 run_id,
                 COUNT(*) AS evidence_count,
                 AVG(monthly_tickets) AS avg_monthly_tickets,
-                AVG(sla_breach_rate) AS avg_sla_breach_rate,
-                AVG(avg_resolution_hours) AS avg_resolution_hours,
+                AVG(
+                    COALESCE(
+                        sla_breach_rate,
+                        CASE
+                            WHEN sla_incumplido IS NULL THEN NULL
+                            WHEN sla_incumplido THEN 1.0
+                            ELSE 0.0
+                        END
+                    )
+                ) AS avg_sla_breach_rate,
+                AVG(COALESCE(tiempo_resolucion_horas, avg_resolution_hours)) AS avg_resolution_hours,
                 AVG(operational_risk_score) AS avg_risk,
                 SUM(CASE WHEN cluster_label = -1 THEN 1 ELSE 0 END) AS outlier_count
             FROM run_evidences
@@ -136,8 +184,17 @@ def init_duckdb() -> None:
                 cluster_label,
                 COUNT(*) AS evidence_count,
                 AVG(monthly_tickets) AS avg_monthly_tickets,
-                AVG(sla_breach_rate) AS avg_sla_breach_rate,
-                AVG(avg_resolution_hours) AS avg_resolution_hours,
+                AVG(
+                    COALESCE(
+                        sla_breach_rate,
+                        CASE
+                            WHEN sla_incumplido IS NULL THEN NULL
+                            WHEN sla_incumplido THEN 1.0
+                            ELSE 0.0
+                        END
+                    )
+                ) AS avg_sla_breach_rate,
+                AVG(COALESCE(tiempo_resolucion_horas, avg_resolution_hours)) AS avg_resolution_hours,
                 AVG(operational_risk_score) AS avg_risk
             FROM run_evidences
             GROUP BY run_id, cluster_label
@@ -291,6 +348,21 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
                 "x": point[0] if point else None,
                 "y": point[1] if point and len(point) > 1 else None,
                 "cluster_label": label,
+                "incident_id": item.get("incident_id"),
+                "categoria": item.get("categoria"),
+                "subcategoria": item.get("subcategoria"),
+                "prioridad": item.get("prioridad"),
+                "servicio_afectado": item.get("servicio_afectado"),
+                "canal_entrada": item.get("canal_entrada"),
+                "tiempo_resolucion_horas": item.get("tiempo_resolucion_horas"),
+                "sla_incumplido": item.get("sla_incumplido"),
+                "reaperturas": item.get("reaperturas"),
+                "escalados": item.get("escalados"),
+                "satisfaccion_usuario": item.get("satisfaccion_usuario"),
+                "coste_estimado": item.get("coste_estimado"),
+                "descripcion_corta": item.get("descripcion_corta"),
+                "causa_raiz_simulada": item.get("causa_raiz_simulada"),
+                "synthetic_segment": item.get("synthetic_segment"),
                 "sector": item.get("sector"),
                 "service_line": item.get("service_line"),
                 "support_channel": item.get("support_channel"),
@@ -318,6 +390,18 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
     with _connect() as con:
         con.execute("DELETE FROM run_registry WHERE run_id = ?", [run_id])
         con.execute("DELETE FROM run_evidences WHERE run_id = ?", [run_id])
+        con.register("registry_df", registry_df)
+        con.execute("INSERT INTO run_registry SELECT * FROM registry_df")
+        if not evidences_df.empty:
+            con.register("evidences_df", evidences_df)
+            evidence_columns_sql = ", ".join(evidences_df.columns)
+            con.execute(
+                f"""
+                INSERT INTO run_evidences ({evidence_columns_sql})
+                SELECT {evidence_columns_sql}
+                FROM evidences_df
+                """
+            )
         _insert_dataframe(con, "run_registry", registry_df, REGISTRY_COLUMNS, "registry_df")
         _insert_dataframe(
             con, "run_evidences", evidences_df, EVIDENCE_COLUMNS, "evidences_df"

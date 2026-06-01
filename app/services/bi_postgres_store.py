@@ -74,6 +74,21 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             x DOUBLE PRECISION,
             y DOUBLE PRECISION,
             cluster_label INTEGER,
+            incident_id TEXT,
+            categoria TEXT,
+            subcategoria TEXT,
+            prioridad TEXT,
+            servicio_afectado TEXT,
+            canal_entrada TEXT,
+            tiempo_resolucion_horas DOUBLE PRECISION,
+            sla_incumplido BOOLEAN,
+            reaperturas DOUBLE PRECISION,
+            escalados DOUBLE PRECISION,
+            satisfaccion_usuario DOUBLE PRECISION,
+            coste_estimado DOUBLE PRECISION,
+            descripcion_corta TEXT,
+            causa_raiz_simulada TEXT,
+            synthetic_segment TEXT,
             sector TEXT,
             service_line TEXT,
             support_channel TEXT,
@@ -151,6 +166,29 @@ def init_bi_schema(engine: Engine | None = None) -> None:
     with engine.begin() as con:
         for statement in statements:
             con.execute(text(statement))
+        incident_columns = {
+            "incident_id": "TEXT",
+            "categoria": "TEXT",
+            "subcategoria": "TEXT",
+            "prioridad": "TEXT",
+            "servicio_afectado": "TEXT",
+            "canal_entrada": "TEXT",
+            "tiempo_resolucion_horas": "DOUBLE PRECISION",
+            "sla_incumplido": "BOOLEAN",
+            "reaperturas": "DOUBLE PRECISION",
+            "escalados": "DOUBLE PRECISION",
+            "satisfaccion_usuario": "DOUBLE PRECISION",
+            "coste_estimado": "DOUBLE PRECISION",
+            "descripcion_corta": "TEXT",
+            "causa_raiz_simulada": "TEXT",
+            "synthetic_segment": "TEXT",
+        }
+        for column, dtype in incident_columns.items():
+            con.execute(
+                text(
+                    f"ALTER TABLE bi_evidences ADD COLUMN IF NOT EXISTS {column} {dtype}"
+                )
+            )
         con.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS idx_bi_evidences_run "
@@ -229,16 +267,25 @@ def _load_bi_frames(run_id: str | None = None) -> dict[str, pd.DataFrame]:
             f"""
             SELECT
                 run_id,
-                COALESCE(category, 'Sin categoria') AS category,
+                COALESCE(categoria, category, sector, 'Sin categoria') AS category,
                 CAST(COUNT(*) AS INTEGER) AS evidence_count,
-                CAST(SUM(CASE WHEN sla_breached THEN 1 ELSE 0 END) AS INTEGER)
+                CAST(SUM(CASE WHEN COALESCE(sla_incumplido, sla_breached) THEN 1 ELSE 0 END) AS INTEGER)
                     AS sla_breached_count,
-                AVG(sla_breach_rate) AS avg_sla_breach_rate,
-                AVG(avg_resolution_hours) AS avg_resolution_hours,
+                AVG(
+                    COALESCE(
+                        sla_breach_rate,
+                        CASE
+                            WHEN sla_incumplido IS NULL THEN NULL
+                            WHEN sla_incumplido THEN 1.0
+                            ELSE 0.0
+                        END
+                    )
+                ) AS avg_sla_breach_rate,
+                AVG(COALESCE(tiempo_resolucion_horas, avg_resolution_hours)) AS avg_resolution_hours,
                 AVG(operational_risk_score) AS avg_risk
             FROM run_evidences
             {evidence_where}
-            GROUP BY run_id, COALESCE(category, 'Sin categoria')
+            GROUP BY run_id, COALESCE(categoria, category, sector, 'Sin categoria')
             """,
             evidence_params,
         ),
@@ -246,17 +293,26 @@ def _load_bi_frames(run_id: str | None = None) -> dict[str, pd.DataFrame]:
             f"""
             SELECT
                 run_id,
-                COALESCE(affected_service, service_line, 'Sin servicio') AS affected_service,
+                COALESCE(servicio_afectado, affected_service, service_line, 'Sin servicio') AS affected_service,
                 CAST(COUNT(*) AS INTEGER) AS evidence_count,
-                AVG(sla_breach_rate) AS avg_sla_breach_rate,
-                AVG(avg_resolution_hours) AS avg_resolution_hours,
+                AVG(
+                    COALESCE(
+                        sla_breach_rate,
+                        CASE
+                            WHEN sla_incumplido IS NULL THEN NULL
+                            WHEN sla_incumplido THEN 1.0
+                            ELSE 0.0
+                        END
+                    )
+                ) AS avg_sla_breach_rate,
+                AVG(COALESCE(tiempo_resolucion_horas, avg_resolution_hours)) AS avg_resolution_hours,
                 AVG(operational_risk_score) AS avg_risk,
                 AVG(business_impact_score) AS avg_business_impact,
                 SUM(security_incidents) AS total_security_incidents,
                 SUM(downtime_hours) AS total_downtime_hours
             FROM run_evidences
             {evidence_where}
-            GROUP BY run_id, COALESCE(affected_service, service_line, 'Sin servicio')
+            GROUP BY run_id, COALESCE(servicio_afectado, affected_service, service_line, 'Sin servicio')
             """,
             evidence_params,
         ),
