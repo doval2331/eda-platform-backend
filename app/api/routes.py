@@ -61,28 +61,30 @@ def _bi_sync_response(run_id: str | None = None) -> BiSyncResponse:
     )
 
 
-def _metrics_from_row(row: AnalysisRun) -> PipelineMetrics:
-    sil = float(row.silhouette) if row.silhouette else None
-    dbi = float(row.davies_bouldin) if row.davies_bouldin else None
-    n_clusters = None
+def _metrics_from_payload(row: AnalysisRun) -> dict:
+    metrics: dict = {}
     try:
         payload = json.loads(row.result_json)
-        n_clusters = payload.get("metrics", {}).get("n_clusters")
-        if n_clusters is not None:
-            n_clusters = int(n_clusters)
+        raw = payload.get("metrics") or {}
+        if isinstance(raw, dict):
+            metrics = dict(raw)
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
-    if n_clusters is None:
+    if metrics.get("silhouette") is None and row.silhouette is not None:
+        metrics["silhouette"] = float(row.silhouette)
+    if metrics.get("davies_bouldin") is None and row.davies_bouldin is not None:
+        metrics["davies_bouldin"] = float(row.davies_bouldin)
+    if metrics.get("n_clusters") is None:
         try:
             labels = json.loads(row.result_json).get("cluster_labels", [])
-            n_clusters = len({int(x) for x in labels if int(x) >= 0})
+            metrics["n_clusters"] = len({int(x) for x in labels if int(x) >= 0})
         except (json.JSONDecodeError, TypeError, ValueError):
-            n_clusters = None
-    return PipelineMetrics(
-        silhouette=sil,
-        davies_bouldin=dbi,
-        n_clusters=n_clusters,
-    )
+            pass
+    return metrics
+
+
+def _metrics_from_row(row: AnalysisRun) -> PipelineMetrics:
+    return PipelineMetrics.model_validate(_metrics_from_payload(row))
 
 
 def _get_run_or_404(db: Session, run_id: str) -> AnalysisRun:

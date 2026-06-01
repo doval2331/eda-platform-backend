@@ -99,32 +99,75 @@ def _login() -> str:
     return str(response["id"])
 
 
-def _find_database_id(session_id: str) -> int:
-    expected_name = _settings().metabase_database_name.strip().lower()
+def _database_payload() -> dict[str, Any]:
+    settings = _settings()
+    return {
+        "engine": "postgres",
+        "name": settings.metabase_database_name,
+        "details": {
+            "host": settings.metabase_pg_host,
+            "port": settings.metabase_pg_port,
+            "dbname": settings.metabase_pg_dbname,
+            "user": settings.metabase_pg_user,
+            "password": settings.metabase_pg_password,
+            "ssl": False,
+            "tunnel-enabled": False,
+        },
+        "is_full_sync": True,
+        "is_on_demand": False,
+        "auto_run_queries": True,
+    }
+
+
+def _list_databases(session_id: str) -> list[dict[str, Any]]:
     response = _json_request("GET", "/api/database", session_id=session_id)
     databases = response.get("data", response) if isinstance(response, dict) else response
     if not isinstance(databases, list):
         raise MetabaseDashboardError("No se pudo leer la lista de bases de Metabase.")
+    return [db for db in databases if isinstance(db, dict)]
 
-    exact_match = next(
+
+def _find_database_id(session_id: str) -> int | None:
+    expected_name = _settings().metabase_database_name.strip().lower()
+    databases = _list_databases(session_id)
+    selected = next(
         (
             db
             for db in databases
             if str(db.get("name", "")).strip().lower() == expected_name
+            and not db.get("is_archived")
+            and db.get("id")
         ),
         None,
     )
-    postgres_match = next(
-        (db for db in databases if str(db.get("engine", "")).lower() == "postgres"),
-        None,
+    return None if not selected else int(selected["id"])
+
+
+def _ensure_database_id(session_id: str) -> int:
+    database_id = _find_database_id(session_id)
+    if database_id:
+        return database_id
+
+    response = _json_request(
+        "POST",
+        "/api/database",
+        payload=_database_payload(),
+        session_id=session_id,
     )
-    selected = exact_match or postgres_match
-    if not selected or not selected.get("id"):
+    if not isinstance(response, dict) or not response.get("id"):
         raise MetabaseDashboardError(
-            "No encontre una base PostgreSQL en Metabase. Agrega la conexion "
-            f"'{_settings().metabase_database_name}' antes de crear el dashboard."
+            "Metabase no devolvio el ID de la conexion PostgreSQL creada."
         )
-    return int(selected["id"])
+    database_id = int(response["id"])
+    try:
+        _json_request(
+            "POST",
+            f"/api/database/{database_id}/sync_schema",
+            session_id=session_id,
+        )
+    except MetabaseDashboardError:
+        pass
+    return database_id
 
 
 def _native_card_payload(spec: DashboardCardSpec, database_id: int) -> dict[str, Any]:
@@ -401,7 +444,7 @@ ORDER BY selected_at DESC
 
 def create_conversation_dashboard() -> dict[str, Any]:
     session_id = _login()
-    database_id = _find_database_id(session_id)
+    database_id = _ensure_database_id(session_id)
     dashboard_id, created = _create_or_reuse_dashboard(session_id)
     cards: list[dict[str, Any]] = []
     card_specs: list[tuple[int, DashboardCardSpec]] = []

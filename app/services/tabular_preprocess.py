@@ -11,6 +11,8 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from app.services.incidents_schema import default_exclude_columns
+
 MAX_CATEGORICAL_CARDINALITY = 40
 MIN_FEATURE_COLUMNS = 2
 DEFAULT_EXCLUDED_COLUMNS = {
@@ -51,6 +53,7 @@ def load_tabular_csv(path, *, n_samples: int | None = None, seed: int = 42) -> p
 def _is_likely_id(series: pd.Series, n_rows: int) -> bool:
     name = str(series.name).lower()
     if name in {"id", "uuid", "client_id", "incident_id", "ticket_id", "record_id", "row_id"}:
+    if name in {"id", "uuid", "client_id", "incident_id", "record_id", "row_id"}:
         return True
     if series.dtype == object and series.nunique() == n_rows:
         return True
@@ -63,6 +66,9 @@ def profile_dataframe(
     exclude_columns: list[str] | None = None,
 ) -> TabularColumnProfile:
     exclude = set(exclude_columns or []) | DEFAULT_EXCLUDED_COLUMNS
+    exclude = set(
+        dict.fromkeys([*(exclude_columns or []), *default_exclude_columns()])
+    )
     numeric: list[str] = []
     categorical: list[str] = []
     excluded: list[str] = []
@@ -104,6 +110,7 @@ def profile_dataframe(
 
     suggested_id = None
     for preferred in ("incident_id", "ticket_id", "client_id", "id", "record_id", "uuid"):
+    for preferred in ("incident_id", "client_id", "id", "record_id", "uuid"):
         if preferred in id_candidates:
             suggested_id = preferred
             break

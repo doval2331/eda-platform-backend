@@ -34,10 +34,28 @@ def init_duckdb() -> None:
                 outliers_count INTEGER,
                 silhouette DOUBLE,
                 davies_bouldin DOUBLE,
-                n_clusters INTEGER
+                n_clusters INTEGER,
+                calinski_harabasz DOUBLE,
+                ari DOUBLE,
+                nmi DOUBLE,
+                cluster_stability DOUBLE,
+                noise_pct DOUBLE
             )
             """
         )
+        registry_columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info('run_registry')").fetchall()
+        }
+        for column, sql_type in (
+            ("calinski_harabasz", "DOUBLE"),
+            ("ari", "DOUBLE"),
+            ("nmi", "DOUBLE"),
+            ("cluster_stability", "DOUBLE"),
+            ("noise_pct", "DOUBLE"),
+        ):
+            if column not in registry_columns:
+                con.execute(f"ALTER TABLE run_registry ADD COLUMN {column} {sql_type}")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS run_evidences (
@@ -184,6 +202,76 @@ def init_duckdb() -> None:
         )
 
 
+REGISTRY_COLUMNS = [
+    "run_id",
+    "created_at",
+    "modality",
+    "reduction_method",
+    "seed",
+    "n_samples",
+    "outliers_count",
+    "silhouette",
+    "davies_bouldin",
+    "n_clusters",
+    "calinski_harabasz",
+    "ari",
+    "nmi",
+    "cluster_stability",
+    "noise_pct",
+]
+
+EVIDENCE_COLUMNS = [
+    "run_id",
+    "evidence_index",
+    "evidence_id",
+    "preview",
+    "source",
+    "x",
+    "y",
+    "cluster_label",
+    "sector",
+    "service_line",
+    "support_channel",
+    "segment",
+    "category",
+    "severity",
+    "status",
+    "assignment_group",
+    "affected_service",
+    "monthly_tickets",
+    "critical_incidents",
+    "avg_resolution_hours",
+    "resolution_minutes",
+    "sla_breach_rate",
+    "sla_breached",
+    "operational_risk_score",
+    "business_impact_score",
+    "security_incidents",
+    "downtime_hours",
+    "customer_satisfaction",
+]
+
+
+def _insert_dataframe(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    df: pd.DataFrame,
+    columns: list[str],
+    register_name: str,
+) -> None:
+    if df.empty:
+        return
+    missing = [column for column in columns if column not in df.columns]
+    if missing:
+        raise ValueError(f"Faltan columnas para {table}: {', '.join(missing)}")
+    subset = df[columns]
+    column_list = ", ".join(columns)
+    con.register(register_name, subset)
+    con.execute(
+        f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {register_name}"
+    )
+
+
 def _metric_value(metrics: dict[str, Any], name: str) -> float | None:
     value = metrics.get(name)
     if value is None:
@@ -234,6 +322,11 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
                     if metrics.get("n_clusters") is not None
                     else None
                 ),
+                "calinski_harabasz": _metric_value(metrics, "calinski_harabasz"),
+                "ari": _metric_value(metrics, "ari"),
+                "nmi": _metric_value(metrics, "nmi"),
+                "cluster_stability": _metric_value(metrics, "cluster_stability"),
+                "noise_pct": _metric_value(metrics, "noise_pct"),
             }
         ]
     )
@@ -309,6 +402,10 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
                 FROM evidences_df
                 """
             )
+        _insert_dataframe(con, "run_registry", registry_df, REGISTRY_COLUMNS, "registry_df")
+        _insert_dataframe(
+            con, "run_evidences", evidences_df, EVIDENCE_COLUMNS, "evidences_df"
+        )
 
 
 def run_exists(run_id: str) -> bool:

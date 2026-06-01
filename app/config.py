@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
     llm_timeout_seconds: int = 20
+    metabase_pg_host: str = "postgres"
+    metabase_pg_port: int = 5432
+    metabase_pg_dbname: str = "eda_platform"
+    metabase_pg_user: str = "eda"
+    metabase_pg_password: str = "eda_local_dev"
     jwt_secret: str = "change-me-in-production-use-long-random-string"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 480

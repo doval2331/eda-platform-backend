@@ -61,6 +61,10 @@ Variables principales en `.env`:
 | `LLM_API_BASE` | `https://api.openai.com/v1` o endpoint compatible |
 | `LLM_API_KEY` | API key del proveedor LLM |
 | `LLM_MODEL` | modelo compatible; para Ollama local se usa `qwen2.5:1.5b`, para OpenAI puede usarse `gpt-4.1-mini` |
+| `METABASE_PG_HOST` | `postgres` si Metabase corre en Docker |
+| `METABASE_PG_DBNAME` | `eda_platform` |
+| `METABASE_PG_USER` | `eda` |
+| `METABASE_PG_PASSWORD` | `eda_local_dev` |
 | `CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174` |
 
 ## Generar dataset IT de ejemplo
@@ -145,6 +149,26 @@ Para probarlo en la interfaz:
 5. Verificar que `incident_id`, `descripcion_corta` y `synthetic_segment` queden excluidas del modelado.
 6. Ejecutar el pipeline.
 7. Probar el chat con preguntas sobre SLA, prioridades, causas raiz, anomalias y clusters criticos.
+## Esquema de incidencias y metricas
+
+El pipeline analiza incidencias IT (no cuentas cliente). Columnas de texto (`descripcion_corta`) y evaluacion (`segment`, `synthetic_segment`) quedan fuera del modelado; los segmentos sinteticos solo sirven para ARI/NMI posteriores.
+
+Documentacion completa: [`docs/dataset_schema.md`](docs/dataset_schema.md).
+
+Metricas devueltas por cada ejecucion (`metrics` en la respuesta):
+
+| Metrica | Descripcion |
+|---------|-------------|
+| `silhouette` | Cohesion/separacion en el espacio 2D |
+| `davies_bouldin` | Dispersion intra/inter cluster (menor es mejor) |
+| `calinski_harabasz` | Separacion en el espacio de features original |
+| `n_clusters` | Clusters HDBSCAN (sin ruido) |
+| `noise_pct` | Porcentaje de puntos marcados como ruido (-1) |
+| `ari` | Adjusted Rand Index vs segmento sintetico (si existe) |
+| `nmi` | Normalized Mutual Information vs segmento sintetico |
+| `cluster_stability` | Acuerdo ARI entre dos HDBSCAN con parametros ligeramente distintos |
+
+Las metricas se persisten en SQLite (`result_json`), DuckDB (`run_registry`) y, si BI esta activo, PostgreSQL (`bi_runs`).
 
 ## Ejecutar API
 
@@ -298,6 +322,11 @@ METABASE_USERNAME=analista@tfm.local
 METABASE_PASSWORD=TfmDemo2026!
 METABASE_DATABASE_NAME=TFM IT Analytics
 METABASE_DASHBOARD_NAME=Dashboard IT - Evidencias conversacionales
+METABASE_PG_HOST=tfm-analytics-db
+METABASE_PG_PORT=5432
+METABASE_PG_DBNAME=tfm_it
+METABASE_PG_USER=tfm
+METABASE_PG_PASSWORD=tfm
 ```
 
 Despues reiniciar la API:
@@ -324,7 +353,8 @@ bi_service_risk
 bi_selected_insights
 ```
 
-En Metabase, agregar una base de datos PostgreSQL con:
+El backend puede crear la conexion PostgreSQL en Metabase automaticamente con
+las variables `METABASE_PG_*`. Si se configura manualmente en Metabase, usar:
 
 | Campo | Valor |
 |-------|-------|
@@ -361,7 +391,7 @@ Ese boton:
 
 1. Publica las tablas `bi_*` desde DuckDB hacia PostgreSQL.
 2. Inicia sesion contra Metabase con `METABASE_USERNAME` y `METABASE_PASSWORD`.
-3. Busca la base `METABASE_DATABASE_NAME`.
+3. Busca o crea la base `METABASE_DATABASE_NAME`.
 4. Crea el dashboard `METABASE_DASHBOARD_NAME`.
 5. Agrega tarjetas para SLA, severidad, servicios, tiempos, clusters e insights seleccionados.
 

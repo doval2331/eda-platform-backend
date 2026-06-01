@@ -56,7 +56,12 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             outliers_count INTEGER,
             silhouette DOUBLE PRECISION,
             davies_bouldin DOUBLE PRECISION,
-            n_clusters INTEGER
+            n_clusters INTEGER,
+            calinski_harabasz DOUBLE PRECISION,
+            ari DOUBLE PRECISION,
+            nmi DOUBLE PRECISION,
+            cluster_stability DOUBLE PRECISION,
+            noise_pct DOUBLE PRECISION
         )
         """,
         """
@@ -202,6 +207,18 @@ def init_bi_schema(engine: Engine | None = None) -> None:
                 "ON bi_selected_insights(run_id)"
             )
         )
+        for column, sql_type in (
+            ("calinski_harabasz", "DOUBLE PRECISION"),
+            ("ari", "DOUBLE PRECISION"),
+            ("nmi", "DOUBLE PRECISION"),
+            ("cluster_stability", "DOUBLE PRECISION"),
+            ("noise_pct", "DOUBLE PRECISION"),
+        ):
+            con.execute(
+                text(
+                    f"ALTER TABLE bi_runs ADD COLUMN IF NOT EXISTS {column} {sql_type}"
+                )
+            )
 
 
 def _run_filter(column: str, run_id: str | None) -> tuple[str, list[Any]]:

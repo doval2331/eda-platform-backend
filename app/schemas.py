@@ -30,15 +30,22 @@ class EvidenceMetadata(BaseModel):
     service_line: str | None = None
     support_channel: str | None = None
     segment: str | None = None
+    synthetic_segment: str | None = None
     category: str | None = None
+    subcategory: str | None = None
+    priority: str | None = None
     severity: str | None = None
     status: str | None = None
     assignment_group: str | None = None
     affected_service: str | None = None
+    short_description: str | None = None
+    root_cause_simulated: str | None = None
     monthly_tickets: float | None = None
     critical_incidents: float | None = None
     avg_resolution_hours: float | None = None
     resolution_minutes: float | None = None
+    reopenings: float | None = None
+    escalations: float | None = None
     sla_breach_rate: float | None = None
     sla_breached: bool | None = None
     operational_risk_score: float | None = None
@@ -46,12 +53,18 @@ class EvidenceMetadata(BaseModel):
     security_incidents: float | None = None
     downtime_hours: float | None = None
     customer_satisfaction: float | None = None
+    estimated_cost: float | None = None
 
 
 class PipelineMetrics(BaseModel):
     silhouette: float | None = None
     davies_bouldin: float | None = None
+    calinski_harabasz: float | None = None
     n_clusters: int | None = None
+    noise_pct: float | None = None
+    ari: float | None = None
+    nmi: float | None = None
+    cluster_stability: float | None = None
 
 
 class PipelineResult(BaseModel):
