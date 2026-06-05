@@ -172,7 +172,6 @@ def _build_it_ops_metadata(
                     bool(sla_breach_rate >= 0.12) if sla_breach_rate is not None else None
                 ),
                 satisfaccion_usuario=_num_or_none(row.get("customer_satisfaction")),
-                synthetic_segment=_str_or_none(row.get("segment")),
                 sector=sector,
                 service_line=service_line,
                 support_channel=support_channel,
