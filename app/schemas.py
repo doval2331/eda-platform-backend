@@ -30,7 +30,6 @@ class EvidenceMetadata(BaseModel):
     service_line: str | None = None
     support_channel: str | None = None
     segment: str | None = None
-    synthetic_segment: str | None = None
     category: str | None = None
     subcategory: str | None = None
     priority: str | None = None
