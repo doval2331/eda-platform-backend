@@ -1,6 +1,7 @@
 import json
 from typing import Annotated
 
+import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -9,6 +10,10 @@ from app.api.deps import get_current_user
 from app.config import get_settings
 from app.db import AnalysisRun, User, get_db, run_to_detail, save_run
 from app.schemas import (
+    AgentInterpretationRequest,
+    AgentServiceResponse,
+    AgentStrategyRequest,
+    AgentTraceResponse,
     ChatRequest,
     ChatResponse,
     ConversationDashboardResponse,
@@ -26,11 +31,19 @@ from app.schemas import (
 from app.services.dataset_store import get_dataset_meta, save_upload
 from app.services.conversation import build_chat_response
 from app.services.duckdb_store import (
+    append_agent_decisions,
+    list_agent_decisions,
     list_selected_insights,
     persist_run_detail,
     run_exists,
+    save_agent_cluster_insights,
+    save_agent_cluster_samples,
+    save_agent_recommendations,
     save_selected_insight,
+    load_run_evidences,
 )
+from app.services.agent_service import run_interpretation_agent, run_strategy_agent
+from app.services.agent_traceability import TraceCollector
 from app.services.bi_postgres_store import (
     get_bi_status,
     sync_bi_tables,
@@ -235,6 +248,86 @@ def chat_with_run(
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
     return build_chat_response(run_id, body.question)
+
+
+@router.post("/api/runs/{run_id}/agents/strategy", response_model=AgentServiceResponse)
+def run_strategy_agent_for_run(
+    run_id: str,
+    body: AgentStrategyRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    evidences = load_run_evidences(run_id)
+    if evidences.empty:
+        raise HTTPException(status_code=422, detail="No hay evidencias materializadas para la corrida")
+    tracer = TraceCollector(run_id=run_id)
+    recommendations = run_strategy_agent(
+        run_id=run_id,
+        evidences=evidences,
+        metrics=_metrics_from_payload(row),
+        sample_size=body.sample_size,
+        sample_criteria=body.sample_criteria,
+        model_name=body.model_name,
+        tracer=tracer,
+    )
+    traces = tracer.to_frame()
+    save_agent_recommendations(run_id, recommendations)
+    append_agent_decisions(traces)
+    return AgentServiceResponse(
+        status="ok",
+        run_id=run_id,
+        trace_ids=traces["trace_id"].tolist() if not traces.empty else [],
+        items=recommendations.where(pd.notnull(recommendations), None).to_dict(orient="records"),
+    )
+
+
+@router.post("/api/runs/{run_id}/agents/interpretation", response_model=AgentServiceResponse)
+def run_interpretation_agent_for_run(
+    run_id: str,
+    body: AgentInterpretationRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    evidences = load_run_evidences(run_id)
+    if evidences.empty:
+        raise HTTPException(status_code=422, detail="No hay evidencias materializadas para la corrida")
+    tracer = TraceCollector(run_id=run_id)
+    samples, insights = run_interpretation_agent(
+        run_id=run_id,
+        evidences=evidences,
+        sample_size=body.sample_size,
+        sample_criteria=body.sample_criteria,
+        random_state=body.random_state,
+        model_name=body.model_name,
+        tracer=tracer,
+    )
+    traces = tracer.to_frame()
+    save_agent_cluster_samples(run_id, samples)
+    save_agent_cluster_insights(run_id, insights)
+    append_agent_decisions(traces)
+    return AgentServiceResponse(
+        status="ok",
+        run_id=run_id,
+        trace_ids=traces["trace_id"].tolist() if not traces.empty else [],
+        items=insights.where(pd.notnull(insights), None).to_dict(orient="records"),
+    )
+
+
+@router.get("/api/runs/{run_id}/agents/traces", response_model=AgentTraceResponse)
+def get_agent_traces_for_run(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    _get_run_or_404(db, run_id)
+    traces = list_agent_decisions(run_id)
+    if not traces:
+        raise HTTPException(status_code=404, detail="No hay trazabilidad de agentes para esta corrida")
+    return AgentTraceResponse(run_id=run_id, trace_count=len(traces), traces=traces)
 
 
 @router.post("/api/runs/{run_id}/insights/select")
