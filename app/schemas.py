@@ -211,3 +211,29 @@ class MetabaseDashboardCreateResponse(BaseModel):
     dashboard_url: str | None = None
     database_id: int | None = None
     cards: list[MetabaseDashboardCard] = Field(default_factory=list)
+
+
+class AgentStrategyRequest(BaseModel):
+    sample_size: int = Field(default=30, ge=1, le=500)
+    sample_criteria: Literal["priority", "random", "mixed"] = "priority"
+    model_name: str = "deterministic-local"
+
+
+class AgentInterpretationRequest(BaseModel):
+    sample_size: int = Field(default=30, ge=1, le=500)
+    sample_criteria: Literal["priority", "random", "mixed"] = "priority"
+    random_state: int = 42
+    model_name: str = "deterministic-local"
+
+
+class AgentServiceResponse(BaseModel):
+    status: str
+    run_id: str
+    trace_ids: list[str] = Field(default_factory=list)
+    items: list[dict] = Field(default_factory=list)
+
+
+class AgentTraceResponse(BaseModel):
+    run_id: str
+    trace_count: int
+    traces: list[dict] = Field(default_factory=list)
