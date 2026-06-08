@@ -64,9 +64,10 @@ def profile_dataframe(
     *,
     exclude_columns: list[str] | None = None,
 ) -> TabularColumnProfile:
-    exclude = set(exclude_columns or []) | DEFAULT_EXCLUDED_COLUMNS
     exclude = set(
-        dict.fromkeys([*(exclude_columns or []), *default_exclude_columns()])
+        dict.fromkeys(
+            [*(exclude_columns or []), *default_exclude_columns(), *DEFAULT_EXCLUDED_COLUMNS]
+        )
     )
     numeric: list[str] = []
     categorical: list[str] = []

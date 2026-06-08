@@ -475,18 +475,6 @@ def persist_run_detail(detail: dict[str, Any]) -> None:
     with _connect() as con:
         con.execute("DELETE FROM run_registry WHERE run_id = ?", [run_id])
         con.execute("DELETE FROM run_evidences WHERE run_id = ?", [run_id])
-        con.register("registry_df", registry_df)
-        con.execute("INSERT INTO run_registry SELECT * FROM registry_df")
-        if not evidences_df.empty:
-            con.register("evidences_df", evidences_df)
-            evidence_columns_sql = ", ".join(evidences_df.columns)
-            con.execute(
-                f"""
-                INSERT INTO run_evidences ({evidence_columns_sql})
-                SELECT {evidence_columns_sql}
-                FROM evidences_df
-                """
-            )
         _insert_dataframe(con, "run_registry", registry_df, REGISTRY_COLUMNS, "registry_df")
         _insert_dataframe(
             con, "run_evidences", evidences_df, EVIDENCE_COLUMNS, "evidences_df"
