@@ -146,6 +146,91 @@ def init_duckdb() -> None:
             )
             """
         )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_strategy_recommendations (
+                run_id VARCHAR,
+                strategy_id VARCHAR,
+                strategy_type VARCHAR,
+                recommendation VARCHAR,
+                justification VARCHAR,
+                variables_used VARCHAR,
+                metric_or_criterion VARCHAR,
+                priority VARCHAR,
+                created_at VARCHAR,
+                trace_id VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_cluster_samples (
+                run_id VARCHAR,
+                evidence_index INTEGER,
+                evidence_id VARCHAR,
+                preview VARCHAR,
+                cluster_label INTEGER,
+                category VARCHAR,
+                categoria VARCHAR,
+                severity VARCHAR,
+                prioridad VARCHAR,
+                affected_service VARCHAR,
+                servicio_afectado VARCHAR,
+                assignment_group VARCHAR,
+                support_channel VARCHAR,
+                sla_breached BOOLEAN,
+                sla_incumplido BOOLEAN,
+                sla_breach_rate DOUBLE,
+                resolution_minutes DOUBLE,
+                avg_resolution_hours DOUBLE,
+                business_impact_score DOUBLE,
+                operational_risk_score DOUBLE,
+                causa_raiz_simulada VARCHAR,
+                selection_rank INTEGER,
+                selection_score DOUBLE,
+                selection_criteria VARCHAR,
+                sample_size_config INTEGER
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_cluster_insights (
+                run_id VARCHAR,
+                cluster_insight_id VARCHAR,
+                cluster_label INTEGER,
+                cluster_name VARCHAR,
+                summary VARCHAR,
+                main_characteristics VARCHAR,
+                highlighted_variables VARCHAR,
+                possible_causes VARCHAR,
+                recommendations VARCHAR,
+                business_conclusion VARCHAR,
+                sample_evidence_ids VARCHAR,
+                sample_size INTEGER,
+                risk_level VARCHAR,
+                generated_at VARCHAR,
+                trace_id VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_decisions (
+                trace_id VARCHAR,
+                run_id VARCHAR,
+                agent_name VARCHAR,
+                decision_type VARCHAR,
+                model_name VARCHAR,
+                parameters VARCHAR,
+                variables_used VARCHAR,
+                input_artifacts VARCHAR,
+                prompt VARCHAR,
+                response VARCHAR,
+                created_at VARCHAR
+            )
+            """
+        )
         existing_columns = {
             row[1]
             for row in con.execute("PRAGMA table_info('selected_insights')").fetchall()
@@ -530,3 +615,163 @@ def list_selected_insights(
     if df.empty:
         return []
     return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+def save_agent_recommendations(run_id: str, recommendations: pd.DataFrame) -> None:
+    init_duckdb()
+    _replace_run_rows(
+        "agent_strategy_recommendations",
+        run_id,
+        recommendations,
+        [
+            "run_id",
+            "strategy_id",
+            "strategy_type",
+            "recommendation",
+            "justification",
+            "variables_used",
+            "metric_or_criterion",
+            "priority",
+            "created_at",
+            "trace_id",
+        ],
+    )
+
+
+def save_agent_cluster_samples(run_id: str, samples: pd.DataFrame) -> None:
+    init_duckdb()
+    _replace_run_rows(
+        "agent_cluster_samples",
+        run_id,
+        samples,
+        [
+            "run_id",
+            "evidence_index",
+            "evidence_id",
+            "preview",
+            "cluster_label",
+            "category",
+            "categoria",
+            "severity",
+            "prioridad",
+            "affected_service",
+            "servicio_afectado",
+            "assignment_group",
+            "support_channel",
+            "sla_breached",
+            "sla_incumplido",
+            "sla_breach_rate",
+            "resolution_minutes",
+            "avg_resolution_hours",
+            "business_impact_score",
+            "operational_risk_score",
+            "causa_raiz_simulada",
+            "selection_rank",
+            "selection_score",
+            "selection_criteria",
+            "sample_size_config",
+        ],
+    )
+
+
+def save_agent_cluster_insights(run_id: str, insights: pd.DataFrame) -> None:
+    init_duckdb()
+    _replace_run_rows(
+        "agent_cluster_insights",
+        run_id,
+        insights,
+        [
+            "run_id",
+            "cluster_insight_id",
+            "cluster_label",
+            "cluster_name",
+            "summary",
+            "main_characteristics",
+            "highlighted_variables",
+            "possible_causes",
+            "recommendations",
+            "business_conclusion",
+            "sample_evidence_ids",
+            "sample_size",
+            "risk_level",
+            "generated_at",
+            "trace_id",
+        ],
+    )
+
+
+def append_agent_decisions(decisions: pd.DataFrame) -> None:
+    init_duckdb()
+    _append_rows(
+        "agent_decisions",
+        decisions,
+        [
+            "trace_id",
+            "run_id",
+            "agent_name",
+            "decision_type",
+            "model_name",
+            "parameters",
+            "variables_used",
+            "input_artifacts",
+            "prompt",
+            "response",
+            "created_at",
+        ],
+    )
+
+
+def list_agent_decisions(run_id: str) -> list[dict[str, Any]]:
+    init_duckdb()
+    with _connect() as con:
+        df = con.execute(
+            """
+            SELECT *
+            FROM agent_decisions
+            WHERE run_id = ?
+            ORDER BY created_at
+            """,
+            [run_id],
+        ).df()
+    if df.empty:
+        return []
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+def _replace_run_rows(
+    table: str,
+    run_id: str,
+    df: pd.DataFrame,
+    columns: list[str],
+) -> None:
+    with _connect() as con:
+        con.execute(f"DELETE FROM {table} WHERE run_id = ?", [run_id])
+        _append_rows_with_connection(con, table, df, columns)
+
+
+def _append_rows(table: str, df: pd.DataFrame, columns: list[str]) -> None:
+    if df.empty:
+        return
+    with _connect() as con:
+        _append_rows_with_connection(con, table, df, columns)
+
+
+def _append_rows_with_connection(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    df: pd.DataFrame,
+    columns: list[str],
+) -> None:
+    if df.empty:
+        return
+    work = df.copy()
+    for column in columns:
+        if column not in work:
+            work[column] = None
+    work = work[columns]
+    register_name = f"{table}_df"
+    con.register(register_name, work)
+    column_list = ", ".join(columns)
+    con.execute(
+        f"INSERT INTO {table} ({column_list}) SELECT {column_list} FROM {register_name}"
+    )
