@@ -278,7 +278,7 @@ def run_pipeline(
     modality: Modality = "it_ops",
     reduction_method: ReductionMethod = "UMAP",
     seed: int = 42,
-    n_samples: int = 2000,
+    n_samples: int | None = None,
     n_features: int = 48,
     n_true_clusters: int = 6,
     dataset_path: Path | str | None = None,
@@ -364,8 +364,9 @@ def run_pipeline(
         )
 
     effective_seed = seed_for_modality(modality, seed)
+    legacy_n_samples = n_samples if n_samples is not None else 2000
     X, true_labels, _ = generate_high_dim_features(
-        n_samples=n_samples,
+        n_samples=legacy_n_samples,
         n_features=n_features,
         n_clusters=n_true_clusters,
         seed=effective_seed,
@@ -381,7 +382,7 @@ def run_pipeline(
         cluster_labels=cluster_labels,
         cfg=cfg,
         df=None,
-        n_samples=n_samples,
+        n_samples=legacy_n_samples,
     )
     metadata = _build_legacy_metadata(
         true_labels, cluster_labels, modality, effective_seed
