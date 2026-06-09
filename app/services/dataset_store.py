@@ -25,6 +25,43 @@ def _csv_path(dataset_id: str) -> Path:
     return uploads_dir() / f"{dataset_id}.csv"
 
 
+_BLOCKED_EXTENSIONS = {
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".xlsb",
+    ".ods",
+    ".tsv",
+    ".json",
+    ".parquet",
+}
+
+_CSV_ONLY_MESSAGE = (
+    "Solo se admiten archivos CSV. Exporta Excel u otros formatos como "
+    "«CSV UTF-8 (delimitado por comas)» antes de subirlos."
+)
+
+
+def _validate_csv_upload(filename: str, content: bytes) -> None:
+    lower = filename.lower().strip()
+    ext = lower[lower.rfind(".") :] if "." in lower else ""
+    if ext in _BLOCKED_EXTENSIONS:
+        raise ValueError(_CSV_ONLY_MESSAGE)
+    if not lower.endswith(".csv"):
+        raise ValueError(_CSV_ONLY_MESSAGE)
+
+    if len(content) >= 4 and content[:4] == b"PK\x03\x04":
+        raise ValueError(
+            "El archivo parece ser Excel u hoja de cálculo (ZIP). "
+            "Guárdalo como CSV UTF-8 y vuelve a subirlo."
+        )
+    if len(content) >= 4 and content[:4] == b"\xd0\xcf\x11\xe0":
+        raise ValueError(
+            "El archivo parece ser Excel antiguo (.xls). "
+            "Guárdalo como CSV UTF-8 y vuelve a subirlo."
+        )
+
+
 def save_upload(
     *,
     user_id: str,
@@ -32,8 +69,7 @@ def save_upload(
     content: bytes,
     exclude_columns: list[str] | None = None,
 ) -> dict:
-    if not filename.lower().endswith(".csv"):
-        raise ValueError("Solo se admiten archivos .csv")
+    _validate_csv_upload(filename, content)
     if len(content) > get_settings().max_upload_bytes:
         raise ValueError(
             f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
@@ -95,6 +131,71 @@ def get_dataset_csv_path(dataset_id: str, *, user_id: str) -> Path:
     if not csv_path.is_file():
         raise FileNotFoundError("Archivo CSV no encontrado")
     return csv_path
+
+
+def _text_path(text_id: str) -> Path:
+    return uploads_dir() / f"{text_id}.txt"
+
+
+def _text_meta_path(text_id: str) -> Path:
+    return uploads_dir() / f"{text_id}.text.meta.json"
+
+
+def save_text_upload(
+    *,
+    user_id: str,
+    filename: str,
+    content: bytes,
+    max_chars: int = 500_000,
+) -> dict:
+    lower = filename.lower().strip()
+    if not lower.endswith((".txt", ".md")):
+        raise ValueError("Solo se admiten archivos de texto (.txt o .md).")
+
+    if len(content) > get_settings().max_upload_bytes:
+        raise ValueError(
+            f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
+        )
+
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("El archivo de texto debe estar en UTF-8.") from exc
+
+    text = text.strip()
+    if not text:
+        raise ValueError("El archivo de texto está vacío.")
+    if len(text) > max_chars:
+        raise ValueError(f"El texto supera el límite de {max_chars} caracteres.")
+
+    text_id = str(uuid.uuid4())
+    _text_path(text_id).write_text(text, encoding="utf-8")
+    preview = text[:400].replace("\n", " ")
+    meta = {
+        "text_id": text_id,
+        "user_id": user_id,
+        "filename": filename,
+        "char_count": len(text),
+        "preview": preview,
+    }
+    _text_meta_path(text_id).write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return meta
+
+
+def get_text_content(text_id: str, *, user_id: str) -> str:
+    path = _text_meta_path(text_id)
+    if not path.is_file():
+        raise FileNotFoundError("Texto no encontrado")
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    if meta.get("user_id") != user_id:
+        raise PermissionError("No tienes acceso a este texto")
+    text_path = _text_path(text_id)
+    if not text_path.is_file():
+        raise FileNotFoundError("Archivo de texto no encontrado")
+    return text_path.read_text(encoding="utf-8")
 
 
 def meta_to_profile(meta: dict) -> TabularColumnProfile:

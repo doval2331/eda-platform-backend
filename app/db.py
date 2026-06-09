@@ -2,7 +2,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.config import get_settings
@@ -26,6 +26,31 @@ class User(Base):
     )
 
 
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    strategy: Mapped[str] = mapped_column(String(32), default="per_source")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ProjectSource(Base):
+    __tablename__ = "project_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_type: Mapped[str] = mapped_column(String(32))
+    dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    n_rows: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    meta_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
 
@@ -39,6 +64,9 @@ class AnalysisRun(Base):
     silhouette: Mapped[str | None] = mapped_column(String(32), nullable=True)
     davies_bouldin: Mapped[str | None] = mapped_column(String(32), nullable=True)
     result_json: Mapped[str] = mapped_column(Text)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    project_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 def _engine():
@@ -56,8 +84,36 @@ engine = _engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
+def _ensure_analysis_run_columns() -> None:
+    """Añade columnas nuevas sin migración formal (SQLite / PostgreSQL)."""
+    url = get_settings().database_url
+    additions = {
+        "project_id": "VARCHAR(36)",
+        "source_type": "VARCHAR(32)",
+        "project_name": "VARCHAR(200)",
+    }
+    with engine.begin() as conn:
+        if url.startswith("sqlite"):
+            rows = conn.execute(text("PRAGMA table_info(analysis_runs)")).fetchall()
+            existing = {row[1] for row in rows}
+        else:
+            rows = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'analysis_runs'"
+                )
+            ).fetchall()
+            existing = {row[0] for row in rows}
+        for column, col_type in additions.items():
+            if column not in existing:
+                conn.execute(
+                    text(f"ALTER TABLE analysis_runs ADD COLUMN {column} {col_type}")
+                )
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_analysis_run_columns()
 
 
 def get_db():
@@ -84,10 +140,12 @@ def save_run(db: Session, *, payload: dict) -> AnalysisRun:
         ),
         davies_bouldin=(
             str(metrics["davies_bouldin"])
-            if metrics.get("davies_bouldin") is not None
-            else None
+            if metrics.get("davies_bouldin") is not None else None
         ),
         result_json=json.dumps(result, ensure_ascii=False),
+        project_id=payload.get("project_id"),
+        source_type=payload.get("source_type"),
+        project_name=payload.get("project_name"),
     )
     db.add(row)
     db.commit()
@@ -112,4 +170,7 @@ def run_to_detail(row: AnalysisRun) -> dict:
         "outliers_count": row.outliers_count,
         "metrics": metrics,
         "result": result,
+        "project_id": row.project_id,
+        "source_type": row.source_type,
+        "project_name": row.project_name,
     }

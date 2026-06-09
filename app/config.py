@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     default_n_samples: int = 2000
     it_ops_dataset_path: str = "data/it_ops_synthetic_10000.csv"
     uploads_dir: str = "data/uploads"
-    max_upload_bytes: int = 15 * 1024 * 1024
+    max_upload_bytes: int = 50 * 1024 * 1024
     duckdb_path: str = "data/eda_platform.duckdb"
     bi_sync_enabled: bool = False
     bi_database_url: str = (
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     llm_api_base: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4.1-mini"
+    llm_api_version: str = ""
     llm_timeout_seconds: int = 20
     metabase_pg_host: str = "postgres"
     metabase_pg_port: int = 5432

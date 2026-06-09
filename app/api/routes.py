@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db import AnalysisRun, User, get_db, run_to_detail, save_run
 from app.schemas import (
     AgentInterpretationRequest,
+    AgentResultsResponse,
     AgentServiceResponse,
     AgentStrategyRequest,
     AgentTraceResponse,
@@ -24,15 +25,26 @@ from app.schemas import (
     MetabaseDashboardCreateResponse,
     MetabaseStatusResponse,
     PipelineMetrics,
+    ProjectCreateBody,
+    ProjectDetail,
+    ProjectRunCreateBody,
+    ProjectRunResponse,
+    ProjectSourceType,
+    ProjectSummary,
+    ProjectUpdateBody,
     RunCreateBody,
+    RunDeleteResponse,
     RunDetail,
+    RunResetResponse,
     RunSummary,
 )
 from app.services.dataset_store import get_dataset_meta, save_upload
 from app.services.conversation import build_chat_response
 from app.services.duckdb_store import (
     append_agent_decisions,
+    list_agent_cluster_insights,
     list_agent_decisions,
+    list_agent_recommendations,
     list_selected_insights,
     persist_run_detail,
     run_exists,
@@ -43,6 +55,7 @@ from app.services.duckdb_store import (
     load_run_evidences,
 )
 from app.services.agent_service import run_interpretation_agent, run_strategy_agent
+from app.services.run_reset import delete_run, reset_all_runs
 from app.services.agent_traceability import TraceCollector
 from app.services.bi_postgres_store import (
     get_bi_status,
@@ -54,6 +67,20 @@ from app.services.metabase_dashboard import (
     create_conversation_dashboard,
 )
 from app.services.pipeline import run_pipeline
+from app.services.project_service import (
+    CSV_SOURCE_TYPES,
+    TEXT_SOURCE_TYPES,
+    add_csv_source,
+    add_text_source,
+    create_project,
+    delete_project_source,
+    get_project_detail,
+    get_project_or_404,
+    list_csv_sources,
+    list_projects,
+    primary_incidents_source,
+    update_project,
+)
 
 router = APIRouter()
 
@@ -112,6 +139,75 @@ def _materialize_run_in_duckdb(row: AnalysisRun) -> None:
         persist_run_detail(run_to_detail(row))
 
 
+def _run_summary_from_row(row: AnalysisRun) -> RunSummary:
+    return RunSummary(
+        id=row.id,
+        created_at=row.created_at,
+        modality=row.modality,  # type: ignore[arg-type]
+        reduction_method=row.reduction_method,  # type: ignore[arg-type]
+        seed=row.seed,
+        n_samples=row.n_samples,
+        outliers_count=row.outliers_count,
+        metrics=_metrics_from_row(row),
+        project_id=row.project_id,
+        project_name=row.project_name,
+        source_type=row.source_type,
+    )
+
+
+def _execute_and_persist_run(
+    db: Session,
+    *,
+    user: User,
+    modality: str,
+    reduction_method: str,
+    seed: int,
+    n_samples: int | None,
+    dataset_id: str | None = None,
+    id_column: str | None = None,
+    exclude_columns: list[str] | None = None,
+    numeric_columns: list[str] | None = None,
+    categorical_columns: list[str] | None = None,
+    project_id: str | None = None,
+    project_name: str | None = None,
+    source_type: str | None = None,
+) -> RunDetail:
+    settings = get_settings()
+    result = run_pipeline(
+        modality=modality,
+        reduction_method=reduction_method,
+        seed=seed,
+        n_samples=n_samples,
+        dataset_path=settings.it_ops_dataset_path,
+        dataset_id=dataset_id,
+        user_id=user.id,
+        id_column=id_column,
+        exclude_columns=exclude_columns or None,
+        numeric_columns=numeric_columns,
+        categorical_columns=categorical_columns,
+    )
+    analyzed_rows = (
+        len(result.metadata)
+        if result.metadata
+        else (n_samples or settings.default_n_samples)
+    )
+    payload = {
+        "modality": modality,
+        "reduction_method": reduction_method,
+        "seed": seed,
+        "n_samples": analyzed_rows,
+        "result": result.model_dump(),
+        "project_id": project_id,
+        "project_name": project_name,
+        "source_type": source_type,
+    }
+    row = save_run(db, payload=payload)
+    detail = run_to_detail(row)
+    persist_run_detail(detail)
+    try_sync_bi_tables(row.id)
+    return RunDetail(**detail)
+
+
 @router.get("/health", response_model=HealthResponse)
 def health(db: Annotated[Session, Depends(get_db)]):
     try:
@@ -159,6 +255,201 @@ def get_dataset_profile(
     return DatasetProfileResponse(**meta)
 
 
+@router.post("/api/projects", response_model=ProjectDetail, status_code=201)
+def create_project_route(
+    body: ProjectCreateBody,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    detail = create_project(
+        db,
+        user_id=user.id,
+        name=body.name,
+        description=body.description,
+        strategy=body.strategy,
+    )
+    return ProjectDetail(**detail, sources=[])
+
+
+@router.get("/api/projects", response_model=list[ProjectSummary])
+def list_projects_route(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    limit: int = 50,
+):
+    return [ProjectSummary(**item) for item in list_projects(db, user_id=user.id, limit=limit)]
+
+
+@router.get("/api/projects/{project_id}", response_model=ProjectDetail)
+def get_project_route(
+    project_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        detail = get_project_detail(db, project_id=project_id, user_id=user.id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return ProjectDetail(**detail)
+
+
+@router.patch("/api/projects/{project_id}", response_model=ProjectDetail)
+def update_project_route(
+    project_id: str,
+    body: ProjectUpdateBody,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        detail = update_project(
+            db,
+            project_id=project_id,
+            user_id=user.id,
+            name=body.name,
+            description=body.description,
+            strategy=body.strategy,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return ProjectDetail(**detail)
+
+
+@router.post("/api/projects/{project_id}/sources", response_model=ProjectDetail)
+async def upload_project_source(
+    project_id: str,
+    source_type: ProjectSourceType,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    file: UploadFile = File(...),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Nombre de archivo requerido")
+    content = await file.read()
+    try:
+        if source_type in CSV_SOURCE_TYPES:
+            detail = add_csv_source(
+                db,
+                project_id=project_id,
+                user_id=user.id,
+                source_type=source_type,
+                filename=file.filename,
+                content=content,
+            )
+        elif source_type in TEXT_SOURCE_TYPES:
+            detail = add_text_source(
+                db,
+                project_id=project_id,
+                user_id=user.id,
+                source_type=source_type,
+                filename=file.filename,
+                content=content,
+            )
+        else:
+            raise HTTPException(status_code=400, detail="Tipo de fuente no soportado")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Error al guardar la fuente") from exc
+    return ProjectDetail(**detail)
+
+
+@router.delete("/api/projects/{project_id}/sources/{source_id}", response_model=ProjectDetail)
+def remove_project_source(
+    project_id: str,
+    source_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        detail = delete_project_source(
+            db,
+            project_id=project_id,
+            source_id=source_id,
+            user_id=user.id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return ProjectDetail(**detail)
+
+
+@router.post("/api/projects/{project_id}/runs", response_model=ProjectRunResponse, status_code=201)
+def create_project_runs(
+    project_id: str,
+    body: ProjectRunCreateBody,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    settings = get_settings()
+    seed = body.seed if body.seed is not None else settings.default_seed
+
+    try:
+        project = get_project_or_404(db, project_id=project_id, user_id=user.id)
+        csv_sources = list_csv_sources(db, project_id=project_id, user_id=user.id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    if not csv_sources:
+        raise HTTPException(
+            status_code=400,
+            detail="El proyecto necesita al menos una fuente CSV para analizar",
+        )
+
+    targets = csv_sources
+    if project.strategy == "unified":
+        primary = primary_incidents_source(csv_sources)
+        if primary is None:
+            raise HTTPException(status_code=400, detail="No hay fuente CSV válida")
+        targets = [primary]
+
+    runs: list[RunDetail] = []
+    try:
+        for source in targets:
+            run_detail = _execute_and_persist_run(
+                db,
+                user=user,
+                modality="tabular",
+                reduction_method=body.reduction_method,
+                seed=seed,
+                n_samples=body.n_samples,
+                dataset_id=source.dataset_id,
+                id_column=body.id_column,
+                exclude_columns=body.exclude_columns,
+                numeric_columns=body.numeric_columns,
+                categorical_columns=body.categorical_columns,
+                project_id=project.id,
+                project_name=project.name,
+                source_type=source.source_type,
+            )
+            runs.append(run_detail)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    primary_run = runs[0]
+    return ProjectRunResponse(
+        project_id=project.id,
+        project_name=project.name,
+        strategy=project.strategy,  # type: ignore[arg-type]
+        primary_run_id=primary_run.id,
+        runs=runs,
+    )
+
+
 @router.post("/api/runs", response_model=RunDetail, status_code=201)
 def create_run(
     body: RunCreateBody,
@@ -167,7 +458,6 @@ def create_run(
 ):
     settings = get_settings()
     seed = body.seed if body.seed is not None else settings.default_seed
-    n_samples = body.n_samples or settings.default_n_samples
 
     if body.modality == "tabular" and not body.dataset_id:
         raise HTTPException(
@@ -176,18 +466,20 @@ def create_run(
         )
 
     try:
-        result = run_pipeline(
+        return _execute_and_persist_run(
+            db,
+            user=user,
             modality=body.modality,
             reduction_method=body.reduction_method,
             seed=seed,
-            n_samples=n_samples,
-            dataset_path=settings.it_ops_dataset_path,
+            n_samples=body.n_samples,
             dataset_id=body.dataset_id,
-            user_id=user.id,
             id_column=body.id_column,
-            exclude_columns=body.exclude_columns or None,
+            exclude_columns=body.exclude_columns,
             numeric_columns=body.numeric_columns,
             categorical_columns=body.categorical_columns,
+            project_name=body.project_name,
+            source_type=body.source_type or ("incidents" if body.modality == "tabular" else None),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -196,18 +488,23 @@ def create_run(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-    payload = {
-        "modality": body.modality,
-        "reduction_method": body.reduction_method,
-        "seed": seed,
-        "n_samples": n_samples,
-        "result": result.model_dump(),
-    }
-    row = save_run(db, payload=payload)
-    detail = run_to_detail(row)
-    persist_run_detail(detail)
-    try_sync_bi_tables(row.id)
-    return RunDetail(**detail)
+
+@router.delete("/api/runs", response_model=RunResetResponse)
+def clear_all_runs(
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    result = reset_all_runs(db)
+    deleted = int(result["deleted_runs"])
+    return RunResetResponse(
+        status="ok",
+        deleted_runs=deleted,
+        duckdb_tables_cleared=result.get("duckdb_tables_cleared") or {},
+        bi_tables_cleared=result.get("bi_tables_cleared"),
+        message=(
+            f"Se eliminaron {deleted} ejecuciones del historial y los datos analiticos asociados."
+        ),
+    )
 
 
 @router.get("/api/runs", response_model=list[RunSummary])
@@ -223,19 +520,7 @@ def list_runs(
         .limit(limit)
         .all()
     )
-    return [
-        RunSummary(
-            id=r.id,
-            created_at=r.created_at,
-            modality=r.modality,  # type: ignore[arg-type]
-            reduction_method=r.reduction_method,  # type: ignore[arg-type]
-            seed=r.seed,
-            n_samples=r.n_samples,
-            outliers_count=r.outliers_count,
-            metrics=_metrics_from_row(r),
-        )
-        for r in rows
-    ]
+    return [_run_summary_from_row(r) for r in rows]
 
 
 @router.post("/api/runs/{run_id}/chat", response_model=ChatResponse)
@@ -263,7 +548,7 @@ def run_strategy_agent_for_run(
     if evidences.empty:
         raise HTTPException(status_code=422, detail="No hay evidencias materializadas para la corrida")
     tracer = TraceCollector(run_id=run_id)
-    recommendations = run_strategy_agent(
+    recommendations, meta = run_strategy_agent(
         run_id=run_id,
         evidences=evidences,
         metrics=_metrics_from_payload(row),
@@ -280,6 +565,10 @@ def run_strategy_agent_for_run(
         run_id=run_id,
         trace_ids=traces["trace_id"].tolist() if not traces.empty else [],
         items=recommendations.where(pd.notnull(recommendations), None).to_dict(orient="records"),
+        llm_used=meta.llm_used,
+        llm_mode=meta.llm_mode,
+        llm_detail=meta.llm_detail,
+        model_name=meta.model_name,
     )
 
 
@@ -296,7 +585,7 @@ def run_interpretation_agent_for_run(
     if evidences.empty:
         raise HTTPException(status_code=422, detail="No hay evidencias materializadas para la corrida")
     tracer = TraceCollector(run_id=run_id)
-    samples, insights = run_interpretation_agent(
+    samples, insights, meta = run_interpretation_agent(
         run_id=run_id,
         evidences=evidences,
         sample_size=body.sample_size,
@@ -314,6 +603,28 @@ def run_interpretation_agent_for_run(
         run_id=run_id,
         trace_ids=traces["trace_id"].tolist() if not traces.empty else [],
         items=insights.where(pd.notnull(insights), None).to_dict(orient="records"),
+        llm_used=meta.llm_used,
+        llm_mode=meta.llm_mode,
+        llm_detail=meta.llm_detail,
+        model_name=meta.model_name,
+    )
+
+
+@router.get("/api/runs/{run_id}/agents/results", response_model=AgentResultsResponse)
+def get_agent_results_for_run(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    _get_run_or_404(db, run_id)
+    recommendations = list_agent_recommendations(run_id)
+    insights = list_agent_cluster_insights(run_id)
+    traces = list_agent_decisions(run_id)
+    return AgentResultsResponse(
+        run_id=run_id,
+        recommendations=recommendations,
+        insights=insights,
+        has_traces=bool(traces),
     )
 
 
@@ -391,6 +702,25 @@ def sync_run_bi_tables(
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
     return _bi_sync_response(run_id)
+
+
+@router.delete("/api/runs/{run_id}", response_model=RunDeleteResponse)
+def delete_run_route(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        result = delete_run(db, run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return RunDeleteResponse(
+        status="ok",
+        run_id=run_id,
+        duckdb_tables_cleared=result.get("duckdb_tables_cleared") or {},
+        bi_tables_cleared=result.get("bi_tables_cleared"),
+        message="Se eliminó la ejecución y sus datos analíticos asociados.",
+    )
 
 
 @router.get("/api/runs/{run_id}", response_model=RunDetail)
