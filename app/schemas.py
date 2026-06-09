@@ -5,6 +5,15 @@ from pydantic import BaseModel, Field
 
 Modality = Literal["texto", "imagen", "multimodal", "it_ops", "tabular"]
 ReductionMethod = Literal["PCA", "t-SNE", "UMAP"]
+ProjectStrategy = Literal["per_source", "unified"]
+ProjectSourceType = Literal[
+    "incidents",
+    "change_mgmt",
+    "software",
+    "hardware",
+    "dictionary",
+    "notes",
+]
 
 
 class EvidenceMetadata(BaseModel):
@@ -98,6 +107,55 @@ class RunCreateBody(BaseModel):
     exclude_columns: list[str] = Field(default_factory=list)
     numeric_columns: list[str] | None = None
     categorical_columns: list[str] | None = None
+    project_name: str | None = Field(default=None, max_length=200)
+    source_type: str | None = Field(default=None, max_length=32)
+
+
+class ProjectCreateBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    strategy: ProjectStrategy = "per_source"
+
+
+class ProjectUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    strategy: ProjectStrategy | None = None
+
+
+class ProjectSourceSummary(BaseModel):
+    id: str
+    source_type: ProjectSourceType
+    filename: str
+    dataset_id: str | None = None
+    n_rows: int | None = None
+    char_count: int | None = None
+
+
+class ProjectSummary(BaseModel):
+    id: str
+    name: str
+    description: str
+    strategy: ProjectStrategy
+    created_at: datetime
+    updated_at: datetime
+    source_count: int = 0
+    csv_source_count: int = 0
+    total_rows: int = 0
+
+
+class ProjectDetail(ProjectSummary):
+    sources: list[ProjectSourceSummary] = Field(default_factory=list)
+
+
+class ProjectRunCreateBody(BaseModel):
+    reduction_method: ReductionMethod = "UMAP"
+    seed: int | None = None
+    n_samples: int | None = Field(default=None, ge=30, le=10_000)
+    id_column: str | None = None
+    exclude_columns: list[str] = Field(default_factory=list)
+    numeric_columns: list[str] | None = None
+    categorical_columns: list[str] | None = None
 
 
 class RunSummary(BaseModel):
@@ -109,10 +167,21 @@ class RunSummary(BaseModel):
     n_samples: int
     outliers_count: int
     metrics: PipelineMetrics
+    project_id: str | None = None
+    project_name: str | None = None
+    source_type: str | None = None
 
 
 class RunDetail(RunSummary):
     result: PipelineResult
+
+
+class ProjectRunResponse(BaseModel):
+    project_id: str
+    project_name: str
+    strategy: ProjectStrategy
+    primary_run_id: str
+    runs: list[RunDetail]
 
 
 class HealthResponse(BaseModel):
@@ -215,14 +284,30 @@ class MetabaseDashboardCreateResponse(BaseModel):
 class AgentStrategyRequest(BaseModel):
     sample_size: int = Field(default=30, ge=1, le=500)
     sample_criteria: Literal["priority", "random", "mixed"] = "priority"
-    model_name: str = "deterministic-local"
+    model_name: str = "auto"
 
 
 class AgentInterpretationRequest(BaseModel):
     sample_size: int = Field(default=30, ge=1, le=500)
     sample_criteria: Literal["priority", "random", "mixed"] = "priority"
     random_state: int = 42
-    model_name: str = "deterministic-local"
+    model_name: str = "auto"
+
+
+class RunResetResponse(BaseModel):
+    status: str
+    deleted_runs: int
+    duckdb_tables_cleared: dict[str, int] = Field(default_factory=dict)
+    bi_tables_cleared: dict[str, int] | None = None
+    message: str
+
+
+class RunDeleteResponse(BaseModel):
+    status: str
+    run_id: str
+    duckdb_tables_cleared: dict[str, int] = Field(default_factory=dict)
+    bi_tables_cleared: dict[str, int] | None = None
+    message: str
 
 
 class AgentServiceResponse(BaseModel):
@@ -230,9 +315,20 @@ class AgentServiceResponse(BaseModel):
     run_id: str
     trace_ids: list[str] = Field(default_factory=list)
     items: list[dict] = Field(default_factory=list)
+    llm_used: bool = False
+    llm_mode: str = "rules"
+    llm_detail: str | None = None
+    model_name: str = "deterministic-local"
 
 
 class AgentTraceResponse(BaseModel):
     run_id: str
     trace_count: int
     traces: list[dict] = Field(default_factory=list)
+
+
+class AgentResultsResponse(BaseModel):
+    run_id: str
+    recommendations: list[dict] = Field(default_factory=list)
+    insights: list[dict] = Field(default_factory=list)
+    has_traces: bool = False

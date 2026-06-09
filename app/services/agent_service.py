@@ -1,13 +1,33 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from app.config import get_settings
 from app.services.agent_sampling import sample_cluster_records
 from app.services.agent_traceability import TraceCollector, to_json, utc_now_iso
+from app.services.llm_agent import (
+    INTERPRETATION_SYSTEM_PROMPT,
+    STRATEGY_SYSTEM_PROMPT,
+    complete_json_with_llm,
+    llm_ready,
+)
+
+
+@dataclass(frozen=True)
+class AgentRunMeta:
+    llm_used: bool
+    llm_mode: str
+    llm_detail: str
+    model_name: str
+
+
+INTERPRETATION_BATCH_SIZE = 10
+MAX_LLM_CLUSTERS = 15
 
 
 def build_cluster_summary(evidences: pd.DataFrame) -> pd.DataFrame:
@@ -45,7 +65,17 @@ def run_strategy_agent(
     sample_criteria: str,
     model_name: str,
     tracer: TraceCollector,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, AgentRunMeta]:
+    use_llm = llm_ready() and model_name != "deterministic-local"
+    effective_model = get_settings().llm_model if use_llm else "deterministic-local"
+    fallback_rows = _strategy_rows(evidences, metrics, sample_size, sample_criteria)
+    llm_result, llm_payload = (None, None)
+    rows = fallback_rows
+    mode = "deterministic"
+    llm_used = False
+    llm_mode = "rules"
+    llm_detail = "Modo deterministico local."
+
     prompt = (
         "Actua como agente de estrategia para una corrida de clustering IT. "
         f"run_id={run_id}; filas={len(evidences)}; columnas={list(evidences.columns)}; "
@@ -53,14 +83,44 @@ def run_strategy_agent(
         f"muestra_por_cluster={sample_size}; criterio_muestra={sample_criteria}. "
         "Recomienda variables, metricas y criterios para interpretar clusters sin enviar el dataset completo."
     )
-    rows = _strategy_rows(evidences, metrics, sample_size, sample_criteria)
-    response = json.dumps({"mode": "deterministic", "recommendations": rows}, ensure_ascii=False, default=str)
+
+    if use_llm:
+        llm_result, llm_payload = complete_json_with_llm(
+            system_prompt=STRATEGY_SYSTEM_PROMPT,
+            user_payload={
+                "run_id": run_id,
+                "evidence_count": len(evidences),
+                "columns": list(evidences.columns),
+                "key_columns": _key_columns(evidences),
+                "metrics": metrics,
+                "sample_size": sample_size,
+                "sample_criteria": sample_criteria,
+                "baseline_recommendations": fallback_rows,
+            },
+        )
+        if llm_result.used and isinstance(llm_payload, dict):
+            llm_rows = _strategy_rows_from_llm(llm_payload.get("recommendations"))
+            if llm_rows:
+                rows = llm_rows
+                mode = "llm_active"
+                llm_used = True
+                llm_mode = llm_result.mode
+                llm_detail = llm_result.detail
+        elif llm_result is not None:
+            llm_mode = llm_result.mode
+            llm_detail = llm_result.detail
+
+    response = json.dumps(
+        {"mode": mode, "llm_used": llm_used, "recommendations": rows},
+        ensure_ascii=False,
+        default=str,
+    )
     trace_id = tracer.record(
         agent_name="strategy_agent",
         decision_type="segmentation_strategy",
         prompt=prompt,
         response=response,
-        model_name=model_name,
+        model_name=effective_model,
         variables_used=_available_columns(
             evidences,
             [
@@ -85,7 +145,13 @@ def run_strategy_agent(
     for row in rows:
         row["run_id"] = run_id
         row["trace_id"] = trace_id
-    return pd.DataFrame(rows)
+    meta = AgentRunMeta(
+        llm_used=llm_used,
+        llm_mode=llm_mode,
+        llm_detail=llm_detail,
+        model_name=effective_model,
+    )
+    return pd.DataFrame(rows), meta
 
 
 def run_interpretation_agent(
@@ -97,7 +163,9 @@ def run_interpretation_agent(
     random_state: int,
     model_name: str,
     tracer: TraceCollector,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, AgentRunMeta]:
+    use_llm = llm_ready() and model_name != "deterministic-local"
+    effective_model = get_settings().llm_model if use_llm else "deterministic-local"
     summary = build_cluster_summary(evidences)
     samples = sample_cluster_records(
         evidences,
@@ -106,28 +174,63 @@ def run_interpretation_agent(
         criteria=sample_criteria,
     )
     rows: list[dict[str, object]] = []
+    llm_used = False
+    llm_mode = "rules"
+    llm_detail = "Modo deterministico local."
     if summary.empty:
-        return samples, pd.DataFrame()
+        meta = AgentRunMeta(
+            llm_used=False,
+            llm_mode=llm_mode,
+            llm_detail=llm_detail,
+            model_name=effective_model,
+        )
+        return samples, pd.DataFrame(), meta
 
-    for _, cluster in summary.sort_values("cluster_label").iterrows():
+    cluster_frames = [
+        cluster
+        for _, cluster in summary.sort_values("cluster_label").iterrows()
+        if int(cluster["cluster_label"]) != -1
+    ]
+    llm_targets = _prioritize_clusters_for_llm(cluster_frames)
+    llm_by_cluster = _llm_cluster_interpretations(llm_targets, samples) if use_llm else {}
+    if llm_by_cluster:
+        llm_used = True
+        llm_mode = "llm_active"
+        llm_detail = (
+            f"Agente LLM activo: {effective_model}. "
+            f"Interpretacion enriquecida en {len(llm_by_cluster)} de {len(cluster_frames)} clusters."
+        )
+
+    for cluster in cluster_frames:
         cluster_label = int(cluster["cluster_label"])
-        if cluster_label == -1:
-            continue
-        cluster_samples = samples[samples["cluster_label"].astype(int) == cluster_label] if not samples.empty else pd.DataFrame()
+        cluster_samples = (
+            samples[samples["cluster_label"].astype(int) == cluster_label]
+            if not samples.empty
+            else pd.DataFrame()
+        )
         insight = _cluster_interpretation(run_id, cluster, cluster_samples)
+        llm_insight = llm_by_cluster.get(cluster_label)
+        if llm_insight:
+            insight = _merge_cluster_interpretation(insight, llm_insight)
+        mode = "llm_active" if llm_insight else "deterministic"
+        insight["interpretation_mode"] = mode
         prompt = (
             "Actua como agente de interpretacion de clusters IT. "
             f"Resumen_cluster={json.dumps(cluster.to_dict(), ensure_ascii=False, default=str)}; "
             f"muestras={json.dumps(cluster_samples.head(30).to_dict(orient='records'), ensure_ascii=False, default=str)}. "
             "Explica patrones, diferencias, posibles causas y recomendaciones usando solo agregados y muestras."
         )
-        response = json.dumps({"mode": "deterministic", "interpretation": insight}, ensure_ascii=False, default=str)
+        response = json.dumps(
+            {"mode": mode, "llm_used": bool(llm_insight), "interpretation": insight},
+            ensure_ascii=False,
+            default=str,
+        )
         trace_id = tracer.record(
             agent_name="interpretation_agent",
             decision_type="cluster_interpretation",
             prompt=prompt,
             response=response,
-            model_name=model_name,
+            model_name=effective_model,
             variables_used=_available_columns(
                 cluster_samples,
                 [
@@ -148,7 +251,121 @@ def run_interpretation_agent(
         )
         insight["trace_id"] = trace_id
         rows.append(insight)
-    return samples, pd.DataFrame(rows)
+
+    meta = AgentRunMeta(
+        llm_used=llm_used,
+        llm_mode=llm_mode,
+        llm_detail=llm_detail,
+        model_name=effective_model,
+    )
+    return samples, pd.DataFrame(rows), meta
+
+
+def _strategy_rows_from_llm(raw_recommendations: object) -> list[dict[str, object]]:
+    if not isinstance(raw_recommendations, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for index, item in enumerate(raw_recommendations):
+        if not isinstance(item, dict):
+            continue
+        recommendation = str(item.get("recommendation") or "").strip()
+        if not recommendation:
+            continue
+        variables = item.get("variables_used", [])
+        if isinstance(variables, str):
+            variables_payload = variables
+        else:
+            variables_payload = to_json(variables if isinstance(variables, list) else [])
+        rows.append(
+            {
+                "strategy_id": str(item.get("strategy_id") or f"llm_strategy_{index + 1}"),
+                "strategy_type": str(item.get("strategy_type") or "interpretation"),
+                "recommendation": recommendation,
+                "justification": str(item.get("justification") or "Recomendacion generada por el agente LLM."),
+                "variables_used": variables_payload,
+                "metric_or_criterion": str(item.get("metric_or_criterion") or "lectura de clusters"),
+                "priority": str(item.get("priority") or "medium"),
+                "created_at": utc_now_iso(),
+            }
+        )
+    return rows
+
+
+def _prioritize_clusters_for_llm(
+    cluster_frames: list[pd.Series],
+    limit: int = MAX_LLM_CLUSTERS,
+) -> list[pd.Series]:
+    def score(cluster: pd.Series) -> tuple[float, int]:
+        return (
+            _safe_float(cluster.get("avg_risk")),
+            int(cluster.get("evidence_count", 0) or 0),
+        )
+
+    ordered = sorted(cluster_frames, key=score, reverse=True)
+    return ordered[:limit]
+
+
+def _llm_cluster_interpretations(
+    cluster_frames: list[pd.Series],
+    samples: pd.DataFrame,
+) -> dict[int, dict[str, str]]:
+    if not cluster_frames:
+        return {}
+    merged: dict[int, dict[str, str]] = {}
+    for start in range(0, len(cluster_frames), INTERPRETATION_BATCH_SIZE):
+        batch = cluster_frames[start : start + INTERPRETATION_BATCH_SIZE]
+        payload_clusters: list[dict[str, object]] = []
+        for cluster in batch:
+            cluster_label = int(cluster["cluster_label"])
+            cluster_samples = (
+                samples[samples["cluster_label"].astype(int) == cluster_label]
+                if not samples.empty
+                else pd.DataFrame()
+            )
+            payload_clusters.append(
+                {
+                    "cluster_label": cluster_label,
+                    "cluster_name": str(cluster.get("cluster_name") or f"cluster_{cluster_label}"),
+                    "summary": cluster.to_dict(),
+                    "samples": cluster_samples.head(8).to_dict(orient="records"),
+                }
+            )
+        llm_result, llm_payload = complete_json_with_llm(
+            system_prompt=INTERPRETATION_SYSTEM_PROMPT,
+            user_payload={"clusters": payload_clusters},
+        )
+        if not llm_result.used or not isinstance(llm_payload, dict):
+            continue
+        for item in llm_payload.get("interpretations", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                cluster_label = int(item.get("cluster_label"))
+            except (TypeError, ValueError):
+                continue
+            merged[cluster_label] = {
+                key: str(item.get(key) or "").strip()
+                for key in (
+                    "summary",
+                    "main_characteristics",
+                    "possible_causes",
+                    "recommendations",
+                    "business_conclusion",
+                )
+                if str(item.get(key) or "").strip()
+            }
+    return merged
+
+
+def _merge_cluster_interpretation(
+    base: dict[str, object],
+    llm_insight: dict[str, str],
+) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in llm_insight.items():
+        if value:
+            merged[key] = value
+    return merged
 
 
 def _strategy_rows(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,9 @@ import duckdb
 import pandas as pd
 
 from app.config import get_settings
+
+_init_lock = threading.Lock()
+_duckdb_initialized = False
 
 
 def _db_path() -> Path:
@@ -21,6 +25,17 @@ def _connect() -> duckdb.DuckDBPyConnection:
 
 
 def init_duckdb() -> None:
+    global _duckdb_initialized
+    if _duckdb_initialized:
+        return
+    with _init_lock:
+        if _duckdb_initialized:
+            return
+        _init_duckdb_schema()
+        _duckdb_initialized = True
+
+
+def _init_duckdb_schema() -> None:
     with _connect() as con:
         con.execute(
             """
@@ -237,6 +252,14 @@ def init_duckdb() -> None:
         }
         if "user_id" not in existing_columns:
             con.execute("ALTER TABLE selected_insights ADD COLUMN user_id VARCHAR")
+        agent_insight_columns = {
+            row[1]
+            for row in con.execute("PRAGMA table_info('agent_cluster_insights')").fetchall()
+        }
+        if "interpretation_mode" not in agent_insight_columns:
+            con.execute(
+                "ALTER TABLE agent_cluster_insights ADD COLUMN interpretation_mode VARCHAR"
+            )
         con.execute(
             """
             CREATE OR REPLACE VIEW vw_run_kpis AS
@@ -696,6 +719,7 @@ def save_agent_cluster_insights(run_id: str, insights: pd.DataFrame) -> None:
             "risk_level",
             "generated_at",
             "trace_id",
+            "interpretation_mode",
         ],
     )
 
@@ -736,6 +760,86 @@ def list_agent_decisions(run_id: str) -> list[dict[str, Any]]:
     if df.empty:
         return []
     return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+def list_agent_recommendations(run_id: str) -> list[dict[str, Any]]:
+    init_duckdb()
+    with _connect() as con:
+        df = con.execute(
+            """
+            SELECT *
+            FROM agent_strategy_recommendations
+            WHERE run_id = ?
+            ORDER BY created_at
+            """,
+            [run_id],
+        ).df()
+    if df.empty:
+        return []
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+def list_agent_cluster_insights(run_id: str) -> list[dict[str, Any]]:
+    init_duckdb()
+    with _connect() as con:
+        df = con.execute(
+            """
+            SELECT *
+            FROM agent_cluster_insights
+            WHERE run_id = ?
+            ORDER BY cluster_label
+            """,
+            [run_id],
+        ).df()
+    if df.empty:
+        return []
+    return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+RUN_DATA_TABLES = [
+    "run_registry",
+    "run_evidences",
+    "selected_insights",
+    "agent_strategy_recommendations",
+    "agent_cluster_samples",
+    "agent_cluster_insights",
+    "agent_decisions",
+]
+
+
+def clear_all_run_data() -> dict[str, int]:
+    """Elimina todas las ejecuciones y datos analiticos asociados en DuckDB."""
+    init_duckdb()
+    cleared: dict[str, int] = {}
+    with _connect() as con:
+        for table in RUN_DATA_TABLES:
+            try:
+                before = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                count = int(before[0]) if before else 0
+                con.execute(f"DELETE FROM {table}")
+                cleared[table] = count
+            except duckdb.CatalogException:
+                cleared[table] = 0
+    return cleared
+
+
+def clear_run_data(run_id: str) -> dict[str, int]:
+    """Elimina los datos analiticos de una ejecucion concreta en DuckDB."""
+    init_duckdb()
+    cleared: dict[str, int] = {}
+    with _connect() as con:
+        for table in RUN_DATA_TABLES:
+            try:
+                before = con.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE run_id = ?",
+                    [run_id],
+                ).fetchone()
+                count = int(before[0]) if before else 0
+                con.execute(f"DELETE FROM {table} WHERE run_id = ?", [run_id])
+                cleared[table] = count
+            except duckdb.CatalogException:
+                cleared[table] = 0
+    return cleared
 
 
 def _replace_run_rows(
