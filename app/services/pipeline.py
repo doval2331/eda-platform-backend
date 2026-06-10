@@ -121,6 +121,20 @@ def _bool_or_none(val) -> bool | None:
     return None
 
 
+def _json_safe_feature_value(val) -> str | float | int | bool | None:
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, (bool, str, int, float)):
+        return val
+    if isinstance(val, np.integer):
+        return int(val)
+    if isinstance(val, np.floating):
+        return float(val)
+    if isinstance(val, pd.Timestamp):
+        return val.isoformat()
+    return str(val)
+
+
 def _severity_from_risk(risk: float | None, critical_incidents: float | None) -> str | None:
     if risk is None and critical_incidents is None:
         return None
@@ -213,8 +227,12 @@ def _build_tabular_metadata(
     df,
     cluster_labels: np.ndarray,
     id_column: str | None,
+    feature_columns: list[str] | None = None,
 ) -> list[EvidenceMetadata]:
     items: list[EvidenceMetadata] = []
+    dynamic_columns = [
+        col for col in dict.fromkeys(feature_columns or []) if col in df.columns
+    ][:24]
     for i in range(len(df)):
         row = df.iloc[i]
         preview = build_row_preview(row, id_column)
@@ -230,6 +248,10 @@ def _build_tabular_metadata(
         if sla_rate is None and sla_incumplido is not None:
             sla_rate = 1.0 if sla_incumplido else 0.0
         tiempo_resolucion_horas = _num_or_none(row.get("tiempo_resolucion_horas"))
+        features = {
+            str(col): _json_safe_feature_value(row.get(col))
+            for col in dynamic_columns
+        }
         items.append(
             EvidenceMetadata(
                 id=row_id,
@@ -268,6 +290,7 @@ def _build_tabular_metadata(
                 sla_breach_rate=sla_rate,
                 sla_breached=sla_incumplido,
                 customer_satisfaction=_num_or_none(row.get("satisfaccion_usuario")),
+                features=features,
             )
         )
     return items
@@ -325,7 +348,12 @@ def run_pipeline(
             n_samples=len(df),
         )
         id_col = id_column or profile.suggested_id_column
-        metadata = _build_tabular_metadata(df, cluster_labels, id_col)
+        metadata = _build_tabular_metadata(
+            df,
+            cluster_labels,
+            id_col,
+            feature_columns=[*num_cols, *cat_cols],
+        )
         return PipelineResult(
             X_2d=X_2d.tolist(),
             cluster_labels=cluster_labels.astype(int).tolist(),

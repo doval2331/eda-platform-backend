@@ -1,4 +1,4 @@
-"""Almacenamiento de CSV subidos por usuario (perfil + fichero)."""
+"""Almacenamiento de fuentes subidas por usuario (perfil + fichero normalizado)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ import uuid
 from pathlib import Path
 
 from app.config import get_settings
-from app.services.tabular_preprocess import TabularColumnProfile, load_tabular_csv, profile_dataframe
+from app.services.source_ingestion import ingest_source
+from app.services.tabular_preprocess import TabularColumnProfile, profile_dataframe
 
 
 def uploads_dir() -> Path:
@@ -69,7 +70,9 @@ def save_upload(
     content: bytes,
     exclude_columns: list[str] | None = None,
 ) -> dict:
-    _validate_csv_upload(filename, content)
+    source = ingest_source(filename, content)
+    if source.normalized_kind != "tabular" or source.dataframe is None:
+        raise ValueError("Esta fuente debe ser tabular: CSV, TSV, Excel, JSON o Parquet.")
     if len(content) > get_settings().max_upload_bytes:
         raise ValueError(
             f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
@@ -77,13 +80,8 @@ def save_upload(
 
     dataset_id = str(uuid.uuid4())
     csv_path = _csv_path(dataset_id)
-    csv_path.write_bytes(content)
-
-    try:
-        df = load_tabular_csv(csv_path)
-    except Exception as exc:
-        csv_path.unlink(missing_ok=True)
-        raise ValueError(f"No se pudo leer el CSV: {exc}") from exc
+    df = source.dataframe
+    df.to_csv(csv_path, index=False)
 
     if len(df) < 30:
         csv_path.unlink(missing_ok=True)
@@ -100,6 +98,9 @@ def save_upload(
         "dataset_id": dataset_id,
         "user_id": user_id,
         "filename": filename,
+        "normalized_kind": source.normalized_kind,
+        "original_format": source.original_format,
+        "extraction_method": source.extraction_method,
         "n_rows": len(df),
         "n_cols": len(df.columns),
         "numeric_columns": profile.numeric_columns,
@@ -107,6 +108,7 @@ def save_upload(
         "excluded_columns": profile.excluded_columns,
         "suggested_id_column": profile.suggested_id_column,
         "all_columns": profile.all_columns,
+        "ingestion_metadata": source.metadata,
     }
     _meta_path(dataset_id).write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
@@ -148,21 +150,16 @@ def save_text_upload(
     content: bytes,
     max_chars: int = 500_000,
 ) -> dict:
-    lower = filename.lower().strip()
-    if not lower.endswith((".txt", ".md")):
-        raise ValueError("Solo se admiten archivos de texto (.txt o .md).")
-
     if len(content) > get_settings().max_upload_bytes:
         raise ValueError(
             f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
         )
 
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("El archivo de texto debe estar en UTF-8.") from exc
+    source = ingest_source(filename, content)
+    if source.normalized_kind != "text" or not source.text:
+        raise ValueError("Esta fuente debe ser documental o audio: TXT, MD, DOCX, PDF o audio.")
 
-    text = text.strip()
+    text = source.text.strip()
     if not text:
         raise ValueError("El archivo de texto está vacío.")
     if len(text) > max_chars:
@@ -175,8 +172,13 @@ def save_text_upload(
         "text_id": text_id,
         "user_id": user_id,
         "filename": filename,
+        "normalized_kind": source.normalized_kind,
+        "original_format": source.original_format,
+        "extraction_method": source.extraction_method,
         "char_count": len(text),
+        "word_count": len(text.split()),
         "preview": preview,
+        "ingestion_metadata": source.metadata,
     }
     _text_meta_path(text_id).write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
