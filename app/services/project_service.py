@@ -10,10 +10,12 @@ from sqlalchemy.orm import Session
 
 from app.db import Project, ProjectSource
 from app.services.dataset_store import get_dataset_meta, save_text_upload, save_upload
+from app.services.source_ingestion import detect_source_kind
 
 CSV_SOURCE_TYPES = frozenset({"incidents", "change_mgmt", "software", "hardware"})
 TEXT_SOURCE_TYPES = frozenset({"dictionary", "notes"})
-ALL_SOURCE_TYPES = CSV_SOURCE_TYPES | TEXT_SOURCE_TYPES
+OTHER_SOURCE_TYPES = frozenset({"other"})
+ALL_SOURCE_TYPES = CSV_SOURCE_TYPES | TEXT_SOURCE_TYPES | OTHER_SOURCE_TYPES
 
 SOURCE_TYPE_LABELS = {
     "incidents": "Incidencias principales",
@@ -22,6 +24,7 @@ SOURCE_TYPE_LABELS = {
     "hardware": "Problemas hardware",
     "dictionary": "Diccionario de datos",
     "notes": "Notas / transcripción",
+    "other": "Otro",
 }
 
 
@@ -29,20 +32,56 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _source_display_name(filename: str, source_name: str | None = None) -> str:
+    if not isinstance(source_name, str):
+        source_name = ""
+    clean_name = (source_name or "").strip()
+    if clean_name:
+        return clean_name[:200]
+    base = filename.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    if "." in base:
+        base = base[: base.rfind(".")]
+    return (base or filename).strip()[:200]
+
+
+def source_display_name(source: ProjectSource) -> str:
+    meta = json.loads(source.meta_json or "{}")
+    return _source_display_name(source.filename, meta.get("source_name"))
+
+
+def _source_is_tabular(source: ProjectSource) -> bool:
+    meta = json.loads(source.meta_json or "{}")
+    normalized_kind = meta.get("normalized_kind")
+    if normalized_kind:
+        return normalized_kind == "tabular"
+    return source.source_type in CSV_SOURCE_TYPES
+
+
 def _source_to_summary(row: ProjectSource) -> dict:
     meta = json.loads(row.meta_json or "{}")
     return {
         "id": row.id,
         "source_type": row.source_type,
+        "source_name": source_display_name(row),
         "filename": row.filename,
         "dataset_id": row.dataset_id,
+        "processing_status": meta.get("processing_status", "processed"),
         "n_rows": row.n_rows,
+        "n_cols": meta.get("n_cols"),
         "char_count": meta.get("char_count"),
+        "word_count": meta.get("word_count"),
+        "normalized_kind": meta.get("normalized_kind"),
+        "original_format": meta.get("original_format"),
+        "extraction_method": meta.get("extraction_method"),
+        "preview": meta.get("preview"),
+        "all_columns": meta.get("all_columns", []),
+        "numeric_columns": meta.get("numeric_columns", []),
+        "categorical_columns": meta.get("categorical_columns", []),
     }
 
 
 def _project_counts(sources: list[ProjectSource]) -> tuple[int, int, int]:
-    csv_sources = [s for s in sources if s.source_type in CSV_SOURCE_TYPES]
+    csv_sources = [s for s in sources if _source_is_tabular(s)]
     total_rows = sum(s.n_rows or 0 for s in csv_sources)
     return len(sources), len(csv_sources), total_rows
 
@@ -183,24 +222,14 @@ def add_csv_source(
     project_id: str,
     user_id: str,
     source_type: str,
+    source_name: str | None = None,
     filename: str,
     content: bytes,
 ) -> dict:
-    if source_type not in CSV_SOURCE_TYPES:
-        raise ValueError(f"Tipo de fuente CSV no válido: {source_type}")
+    if source_type not in CSV_SOURCE_TYPES | OTHER_SOURCE_TYPES:
+        raise ValueError(f"Tipo de fuente tabular no valido: {source_type}")
 
     project = get_project_or_404(db, project_id=project_id, user_id=user_id)
-
-    existing = (
-        db.query(ProjectSource)
-        .filter(
-            ProjectSource.project_id == project_id,
-            ProjectSource.source_type == source_type,
-        )
-        .first()
-    )
-    if existing:
-        db.delete(existing)
 
     meta = save_upload(user_id=user_id, filename=filename, content=content)
     now = _now()
@@ -213,11 +242,18 @@ def add_csv_source(
         n_rows=meta["n_rows"],
         meta_json=json.dumps(
             {
+                "source_name": _source_display_name(filename, source_name),
+                "processing_status": "processed",
+                "normalized_kind": meta.get("normalized_kind"),
+                "original_format": meta.get("original_format"),
+                "extraction_method": meta.get("extraction_method"),
+                "n_cols": meta.get("n_cols"),
                 "numeric_columns": meta["numeric_columns"],
                 "categorical_columns": meta["categorical_columns"],
                 "excluded_columns": meta.get("excluded_columns", []),
                 "suggested_id_column": meta.get("suggested_id_column"),
                 "all_columns": meta.get("all_columns", []),
+                "ingestion_metadata": meta.get("ingestion_metadata", {}),
             },
             ensure_ascii=False,
         ),
@@ -235,24 +271,14 @@ def add_text_source(
     project_id: str,
     user_id: str,
     source_type: str,
+    source_name: str | None = None,
     filename: str,
     content: bytes,
 ) -> dict:
-    if source_type not in TEXT_SOURCE_TYPES:
-        raise ValueError(f"Tipo de fuente de texto no válido: {source_type}")
+    if source_type not in TEXT_SOURCE_TYPES | OTHER_SOURCE_TYPES:
+        raise ValueError(f"Tipo de fuente de texto no valido: {source_type}")
 
     project = get_project_or_404(db, project_id=project_id, user_id=user_id)
-
-    existing = (
-        db.query(ProjectSource)
-        .filter(
-            ProjectSource.project_id == project_id,
-            ProjectSource.source_type == source_type,
-        )
-        .first()
-    )
-    if existing:
-        db.delete(existing)
 
     meta = save_text_upload(user_id=user_id, filename=filename, content=content)
     now = _now()
@@ -264,7 +290,17 @@ def add_text_source(
         filename=filename,
         n_rows=None,
         meta_json=json.dumps(
-            {"char_count": meta["char_count"], "preview": meta.get("preview", "")},
+            {
+                "source_name": _source_display_name(filename, source_name),
+                "processing_status": "processed",
+                "normalized_kind": meta.get("normalized_kind"),
+                "original_format": meta.get("original_format"),
+                "extraction_method": meta.get("extraction_method"),
+                "char_count": meta["char_count"],
+                "word_count": meta.get("word_count"),
+                "preview": meta.get("preview", ""),
+                "ingestion_metadata": meta.get("ingestion_metadata", {}),
+            },
             ensure_ascii=False,
         ),
         created_at=now,
@@ -275,17 +311,70 @@ def add_text_source(
     return get_project_detail(db, project_id=project_id, user_id=user_id)
 
 
+def add_project_source(
+    db: Session,
+    *,
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_name: str | None = None,
+    filename: str,
+    content: bytes,
+) -> dict:
+    if source_type not in ALL_SOURCE_TYPES:
+        raise ValueError(f"Tipo de fuente no valido: {source_type}")
+    if source_type in CSV_SOURCE_TYPES:
+        return add_csv_source(
+            db,
+            project_id=project_id,
+            user_id=user_id,
+            source_type=source_type,
+            source_name=source_name,
+            filename=filename,
+            content=content,
+        )
+    if source_type in TEXT_SOURCE_TYPES:
+        return add_text_source(
+            db,
+            project_id=project_id,
+            user_id=user_id,
+            source_type=source_type,
+            source_name=source_name,
+            filename=filename,
+            content=content,
+        )
+
+    normalized_kind = detect_source_kind(filename)
+    if normalized_kind == "tabular":
+        return add_csv_source(
+            db,
+            project_id=project_id,
+            user_id=user_id,
+            source_type=source_type,
+            source_name=source_name,
+            filename=filename,
+            content=content,
+        )
+    return add_text_source(
+        db,
+        project_id=project_id,
+        user_id=user_id,
+        source_type=source_type,
+        source_name=source_name,
+        filename=filename,
+        content=content,
+    )
+
+
 def list_csv_sources(db: Session, *, project_id: str, user_id: str) -> list[ProjectSource]:
     get_project_or_404(db, project_id=project_id, user_id=user_id)
-    return (
+    sources = (
         db.query(ProjectSource)
-        .filter(
-            ProjectSource.project_id == project_id,
-            ProjectSource.source_type.in_(CSV_SOURCE_TYPES),
-        )
+        .filter(ProjectSource.project_id == project_id)
         .order_by(ProjectSource.created_at.asc())
         .all()
     )
+    return [source for source in sources if _source_is_tabular(source)]
 
 
 def get_source_dataset_meta(

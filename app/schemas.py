@@ -13,6 +13,7 @@ ProjectSourceType = Literal[
     "hardware",
     "dictionary",
     "notes",
+    "other",
 ]
 
 
@@ -62,6 +63,7 @@ class EvidenceMetadata(BaseModel):
     downtime_hours: float | None = None
     customer_satisfaction: float | None = None
     estimated_cost: float | None = None
+    features: dict[str, str | float | int | bool | None] = Field(default_factory=dict)
 
 
 class PipelineMetrics(BaseModel):
@@ -86,6 +88,9 @@ class PipelineResult(BaseModel):
 class DatasetProfileResponse(BaseModel):
     dataset_id: str
     filename: str
+    normalized_kind: str | None = None
+    original_format: str | None = None
+    extraction_method: str | None = None
     n_rows: int
     n_cols: int
     numeric_columns: list[str]
@@ -126,10 +131,21 @@ class ProjectUpdateBody(BaseModel):
 class ProjectSourceSummary(BaseModel):
     id: str
     source_type: ProjectSourceType
+    source_name: str | None = None
     filename: str
     dataset_id: str | None = None
+    processing_status: str = "processed"
     n_rows: int | None = None
+    n_cols: int | None = None
     char_count: int | None = None
+    word_count: int | None = None
+    normalized_kind: str | None = None
+    original_format: str | None = None
+    extraction_method: str | None = None
+    preview: str | None = None
+    all_columns: list[str] = Field(default_factory=list)
+    numeric_columns: list[str] = Field(default_factory=list)
+    categorical_columns: list[str] = Field(default_factory=list)
 
 
 class ProjectSummary(BaseModel):
@@ -170,6 +186,8 @@ class RunSummary(BaseModel):
     project_id: str | None = None
     project_name: str | None = None
     source_type: str | None = None
+    source_id: str | None = None
+    source_name: str | None = None
 
 
 class RunDetail(RunSummary):

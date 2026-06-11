@@ -66,6 +66,8 @@ class AnalysisRun(Base):
     result_json: Mapped[str] = mapped_column(Text)
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     project_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
@@ -90,6 +92,8 @@ def _ensure_analysis_run_columns() -> None:
     additions = {
         "project_id": "VARCHAR(36)",
         "source_type": "VARCHAR(32)",
+        "source_id": "VARCHAR(36)",
+        "source_name": "VARCHAR(200)",
         "project_name": "VARCHAR(200)",
     }
     with engine.begin() as conn:
@@ -145,6 +149,8 @@ def save_run(db: Session, *, payload: dict) -> AnalysisRun:
         result_json=json.dumps(result, ensure_ascii=False),
         project_id=payload.get("project_id"),
         source_type=payload.get("source_type"),
+        source_id=payload.get("source_id"),
+        source_name=payload.get("source_name"),
         project_name=payload.get("project_name"),
     )
     db.add(row)
@@ -172,5 +178,7 @@ def run_to_detail(row: AnalysisRun) -> dict:
         "result": result,
         "project_id": row.project_id,
         "source_type": row.source_type,
+        "source_id": row.source_id,
+        "source_name": row.source_name,
         "project_name": row.project_name,
     }
