@@ -2,6 +2,7 @@ import pytest
 
 from app.services.project_service import (
     CSV_SOURCE_TYPES,
+    OTHER_SOURCE_TYPES,
     TEXT_SOURCE_TYPES,
     primary_incidents_source,
     SOURCE_TYPE_LABELS,
@@ -36,5 +37,5 @@ def test_primary_incidents_source_fallback_order():
 
 
 def test_source_type_labels_cover_all_types():
-    for source_type in CSV_SOURCE_TYPES | TEXT_SOURCE_TYPES:
+    for source_type in CSV_SOURCE_TYPES | TEXT_SOURCE_TYPES | OTHER_SOURCE_TYPES:
         assert source_type in SOURCE_TYPE_LABELS

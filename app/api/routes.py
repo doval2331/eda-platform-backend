@@ -2,7 +2,7 @@ import json
 from typing import Annotated
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -68,10 +68,7 @@ from app.services.metabase_dashboard import (
 )
 from app.services.pipeline import run_pipeline
 from app.services.project_service import (
-    CSV_SOURCE_TYPES,
-    TEXT_SOURCE_TYPES,
-    add_csv_source,
-    add_text_source,
+    add_project_source,
     create_project,
     delete_project_source,
     get_project_detail,
@@ -79,6 +76,7 @@ from app.services.project_service import (
     list_csv_sources,
     list_projects,
     primary_incidents_source,
+    source_display_name,
     update_project,
 )
 
@@ -152,6 +150,8 @@ def _run_summary_from_row(row: AnalysisRun) -> RunSummary:
         project_id=row.project_id,
         project_name=row.project_name,
         source_type=row.source_type,
+        source_id=row.source_id,
+        source_name=row.source_name,
     )
 
 
@@ -171,6 +171,8 @@ def _execute_and_persist_run(
     project_id: str | None = None,
     project_name: str | None = None,
     source_type: str | None = None,
+    source_id: str | None = None,
+    source_name: str | None = None,
 ) -> RunDetail:
     settings = get_settings()
     result = run_pipeline(
@@ -200,6 +202,8 @@ def _execute_and_persist_run(
         "project_id": project_id,
         "project_name": project_name,
         "source_type": source_type,
+        "source_id": source_id,
+        "source_name": source_name,
     }
     row = save_run(db, payload=payload)
     detail = run_to_detail(row)
@@ -324,32 +328,22 @@ async def upload_project_source(
     source_type: ProjectSourceType,
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
+    source_name: str | None = Form(None),
     file: UploadFile = File(...),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nombre de archivo requerido")
     content = await file.read()
     try:
-        if source_type in CSV_SOURCE_TYPES:
-            detail = add_csv_source(
-                db,
-                project_id=project_id,
-                user_id=user.id,
-                source_type=source_type,
-                filename=file.filename,
-                content=content,
-            )
-        elif source_type in TEXT_SOURCE_TYPES:
-            detail = add_text_source(
-                db,
-                project_id=project_id,
-                user_id=user.id,
-                source_type=source_type,
-                filename=file.filename,
-                content=content,
-            )
-        else:
-            raise HTTPException(status_code=400, detail="Tipo de fuente no soportado")
+        detail = add_project_source(
+            db,
+            project_id=project_id,
+            user_id=user.id,
+            source_type=source_type,
+            source_name=source_name,
+            filename=file.filename,
+            content=content,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -403,7 +397,7 @@ def create_project_runs(
     if not csv_sources:
         raise HTTPException(
             status_code=400,
-            detail="El proyecto necesita al menos una fuente CSV para analizar",
+            detail="El proyecto necesita al menos una fuente tabular para analizar",
         )
 
     targets = csv_sources
@@ -431,6 +425,8 @@ def create_project_runs(
                 project_id=project.id,
                 project_name=project.name,
                 source_type=source.source_type,
+                source_id=source.id,
+                source_name=source_display_name(source),
             )
             runs.append(run_detail)
     except ValueError as exc:
