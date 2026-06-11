@@ -21,6 +21,8 @@ SUGGESTED_QUESTIONS = [
     "Que acciones recomendadas puedo evaluar?",
 ]
 
+FALLBACK_SUGGESTED_QUESTIONS = SUGGESTED_QUESTIONS
+
 SERVICE_COLS = ("servicio_afectado", "affected_service", "service_line")
 PRIORITY_COLS = ("prioridad", "severity")
 CATEGORY_COLS = ("categoria", "category", "sector")
@@ -33,6 +35,71 @@ SATISFACTION_COLS = ("satisfaccion_usuario", "customer_satisfaction")
 COST_COLS = ("coste_estimado", "estimated_cost")
 ROOT_CAUSE_COLS = ("causa_raiz_simulada", "root_cause")
 RISK_COLS = ("operational_risk_score", "business_impact_score")
+
+
+def _has_col(df: pd.DataFrame, aliases: tuple[str, ...]) -> bool:
+    return any(name in df.columns for name in aliases)
+
+
+def build_suggested_questions_for_run(run_id: str) -> list[str]:
+    df = load_run_evidences(run_id)
+    if df.empty:
+        return FALLBACK_SUGGESTED_QUESTIONS
+    return _suggested_questions_for_df(df)
+
+
+def _suggested_questions_for_df(df: pd.DataFrame) -> list[str]:
+    questions: list[str] = ["Que puedo analizar con estas fuentes?"]
+
+    has_service = _has_col(df, SERVICE_COLS)
+    has_priority = _has_col(df, PRIORITY_COLS)
+    has_category = _has_col(df, CATEGORY_COLS)
+    has_sla = _has_col(df, SLA_COLS)
+    has_resolution = _has_col(df, RESOLUTION_COLS)
+    has_root_cause = _has_col(df, ROOT_CAUSE_COLS)
+    has_risk = _has_col(df, RISK_COLS)
+    has_reopen = _has_col(df, REOPEN_COLS)
+    has_escalation = _has_col(df, ESCALATION_COLS)
+    has_cluster = "cluster_label" in df.columns
+
+    if has_sla and has_service:
+        questions.append("Que servicios concentran mas incumplimiento de SLA?")
+    elif has_sla:
+        questions.append("Como esta el incumplimiento de SLA en esta ejecucion?")
+
+    if has_resolution and has_service:
+        questions.append("Que servicios tardan mas en resolverse?")
+    elif has_resolution:
+        questions.append("Donde se concentran los mayores tiempos de resolucion?")
+
+    if has_priority and (has_service or has_category):
+        questions.append("Que grupos tienen mayor urgencia o prioridad?")
+    elif has_priority:
+        questions.append("Como se distribuyen las incidencias por prioridad?")
+
+    if has_risk:
+        questions.append("Que grupos tienen mayor impacto o riesgo operativo?")
+
+    if has_root_cause:
+        questions.append("Que causas raiz se repiten con mayor frecuencia?")
+
+    if has_reopen:
+        questions.append("Que patrones aparecen en los casos reabiertos?")
+
+    if has_escalation:
+        questions.append("Que grupos tienen mas escalaciones?")
+
+    if has_cluster:
+        questions.append("Que grupos detectados deberia revisar primero?")
+        questions.append("Hay casos atipicos que convenga revisar por separado?")
+
+    questions.append("Que hallazgos conviene llevar al dashboard?")
+
+    deduped: list[str] = []
+    for question in questions:
+        if question not in deduped:
+            deduped.append(question)
+    return deduped[:8]
 
 
 def _normalize(text: str) -> str:
@@ -712,10 +779,11 @@ def build_chat_response(run_id: str, question: str) -> ChatResponse:
     if df.empty:
         return ChatResponse(
             answer="No encontre incidencias materializadas en DuckDB para esta ejecucion. Ejecuta el pipeline nuevamente.",
-            suggested_questions=SUGGESTED_QUESTIONS,
+            suggested_questions=FALLBACK_SUGGESTED_QUESTIONS,
         )
 
     normalized = _normalize(question)
+    suggested_questions = _suggested_questions_for_df(df)
     answer_parts: list[str] = []
     insights: list[InsightCandidate] = []
     tool_summaries: list[dict] = []
@@ -780,7 +848,7 @@ def build_chat_response(run_id: str, question: str) -> ChatResponse:
 
     return ChatResponse(
         answer=llm_result.answer,
-        suggested_questions=SUGGESTED_QUESTIONS,
+        suggested_questions=suggested_questions,
         insights=insights[:8],
         llm_used=llm_result.used,
         llm_mode=llm_result.mode,

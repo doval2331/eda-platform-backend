@@ -249,6 +249,10 @@ class ChatResponse(BaseModel):
     llm_detail: str | None = None
 
 
+class ChatSuggestionsResponse(BaseModel):
+    suggested_questions: list[str] = Field(default_factory=list)
+
+
 class InsightSelectionBody(BaseModel):
     insight: InsightCandidate
 
@@ -310,6 +314,22 @@ class AgentInterpretationRequest(BaseModel):
     sample_criteria: Literal["priority", "random", "mixed"] = "priority"
     random_state: int = 42
     model_name: str = "auto"
+
+
+class AgentHumanDecisionRequest(BaseModel):
+    decision_type: str = Field(default="strategy_approval", min_length=1)
+    status: Literal["approved", "rejected", "needs_review"] = "approved"
+    summary: str = Field(default="Estrategia validada por el analista.", min_length=1)
+    approved_strategy_ids: list[str] = Field(default_factory=list)
+    parameters: dict[str, object] = Field(default_factory=dict)
+    model_name: str = "human-in-the-loop"
+
+
+class AgentHumanDecisionResponse(BaseModel):
+    status: str
+    run_id: str
+    trace_id: str
+    message: str
 
 
 class RunResetResponse(BaseModel):
