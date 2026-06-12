@@ -530,22 +530,64 @@ def chat_with_run(
     run_id: str,
     body: ChatRequest,
     db: Annotated[Session, Depends(get_db)],
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
 ):
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
-    return build_chat_response(run_id, body.question)
+    project_sources: list[dict] = []
+    project_strategy: str | None = None
+    if row.project_id:
+        try:
+            project_detail = get_project_detail(db, project_id=row.project_id, user_id=user.id)
+            project_sources = project_detail.get("sources", [])
+            project_strategy = project_detail.get("strategy")
+        except (LookupError, PermissionError):
+            project_sources = []
+    return build_chat_response(
+        run_id,
+        body.question,
+        run_context={
+            "project_name": row.project_name,
+            "project_strategy": project_strategy,
+            "source_type": row.source_type,
+            "source_name": row.source_name,
+            "source_id": row.source_id,
+            "sources": project_sources,
+        },
+        history=[item.model_dump() for item in body.history[-8:]],
+    )
 
 
 @router.get("/api/runs/{run_id}/chat/suggestions", response_model=ChatSuggestionsResponse)
 def get_chat_suggestions_for_run(
     run_id: str,
     db: Annotated[Session, Depends(get_db)],
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
 ):
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
-    return ChatSuggestionsResponse(suggested_questions=build_suggested_questions_for_run(run_id))
+    project_sources: list[dict] = []
+    project_strategy: str | None = None
+    if row.project_id:
+        try:
+            project_detail = get_project_detail(db, project_id=row.project_id, user_id=user.id)
+            project_sources = project_detail.get("sources", [])
+            project_strategy = project_detail.get("strategy")
+        except (LookupError, PermissionError):
+            project_sources = []
+    return ChatSuggestionsResponse(
+        suggested_questions=build_suggested_questions_for_run(
+            run_id,
+            run_context={
+                "project_name": row.project_name,
+                "project_strategy": project_strategy,
+                "source_type": row.source_type,
+                "source_name": row.source_name,
+                "source_id": row.source_id,
+                "sources": project_sources,
+            },
+        )
+    )
 
 
 @router.post("/api/runs/{run_id}/agents/strategy", response_model=AgentServiceResponse)
