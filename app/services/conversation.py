@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 
 import pandas as pd
@@ -11,14 +12,10 @@ from app.services.llm_agent import explain_with_llm
 
 
 SUGGESTED_QUESTIONS = [
-    "Que puedo analizar con estas incidencias?",
-    "Que servicios incumplen mas SLA?",
-    "Que prioridades tienen mas demoras?",
-    "Que causas raiz se repiten?",
-    "Que clusters son mas criticos?",
-    "Que incidencias parecen anomalas?",
-    "Que alternativas de decision conviene priorizar?",
-    "Que acciones recomendadas puedo evaluar?",
+    "Que puedo analizar con estas fuentes?",
+    "Que columnas o variables estan disponibles para analizar?",
+    "Que grupos detectados deberia revisar primero?",
+    "Que hallazgos conviene llevar al dashboard?",
 ]
 
 FALLBACK_SUGGESTED_QUESTIONS = SUGGESTED_QUESTIONS
@@ -35,65 +32,260 @@ SATISFACTION_COLS = ("satisfaccion_usuario", "customer_satisfaction")
 COST_COLS = ("coste_estimado", "estimated_cost")
 ROOT_CAUSE_COLS = ("causa_raiz_simulada", "root_cause")
 RISK_COLS = ("operational_risk_score", "business_impact_score")
+SOURCE_COLS = ("source_name", "source", "dataset", "archivo", "filename")
+
+SOURCE_TYPE_LABELS = {
+    "incidents": "incidencias",
+    "change_mgmt": "gestion del cambio",
+    "software": "problemas software",
+    "hardware": "problemas hardware",
+    "dictionary": "diccionario de datos",
+    "notes": "notas o documentacion",
+    "other": "otra fuente",
+    "tabular": "fuente tabular",
+}
 
 
 def _has_col(df: pd.DataFrame, aliases: tuple[str, ...]) -> bool:
     return any(name in df.columns for name in aliases)
 
 
-def build_suggested_questions_for_run(run_id: str) -> list[str]:
+def _first_alias(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
+    for name in aliases:
+        if name in df.columns:
+            return name
+    return None
+
+
+def _clean_text_series(series: pd.Series) -> pd.Series:
+    values = series.dropna().astype(str).str.strip()
+    return values[
+        ~values.str.lower().isin(
+            {"", "nan", "none", "null", "sin dato", "no aplica", "unknown", "n/a"}
+        )
+    ]
+
+
+def _has_value_signal(df: pd.DataFrame, aliases: tuple[str, ...]) -> bool:
+    column = _first_alias(df, aliases)
+    if not column:
+        return False
+    series = df[column]
+    if pd.api.types.is_bool_dtype(series):
+        return bool(series.dropna().shape[0])
+    if pd.api.types.is_numeric_dtype(series):
+        numeric = pd.to_numeric(series, errors="coerce").dropna()
+        return bool(numeric.shape[0])
+    return bool(_clean_text_series(series).shape[0])
+
+
+def _has_repeated_text_signal(df: pd.DataFrame, aliases: tuple[str, ...]) -> bool:
+    column = _first_alias(df, aliases)
+    if not column:
+        return False
+    counts = _clean_text_series(df[column]).value_counts()
+    return bool((counts >= 2).any())
+
+
+def _has_cluster_signal(df: pd.DataFrame) -> bool:
+    if "cluster_label" not in df.columns:
+        return False
+    labels = pd.to_numeric(df["cluster_label"], errors="coerce").dropna()
+    return bool((labels >= 0).any())
+
+
+def _has_outlier_signal(df: pd.DataFrame) -> bool:
+    if "cluster_label" not in df.columns:
+        return False
+    labels = pd.to_numeric(df["cluster_label"], errors="coerce").dropna()
+    return bool((labels == -1).any())
+
+
+def _scenario_sources(run_context: dict | None) -> list[dict]:
+    return [
+        item
+        for item in ((run_context or {}).get("sources") or [])
+        if isinstance(item, dict)
+    ]
+
+
+def _cluster_count(df: pd.DataFrame) -> int:
+    if "cluster_label" not in df.columns:
+        return 0
+    labels = pd.to_numeric(df["cluster_label"], errors="coerce").dropna()
+    return int(labels[labels >= 0].nunique())
+
+
+def _has_any_assignment_col(df: pd.DataFrame) -> bool:
+    return bool(
+        _first_col(df, SERVICE_COLS)
+        or _first_col(df, PRIORITY_COLS)
+        or _first_col(df, SLA_COLS)
+    )
+
+
+def _tool_catalog(df: pd.DataFrame, run_context: dict | None = None) -> list[dict[str, object]]:
+    sources = _scenario_sources(run_context)
+    has_sources = bool(sources)
+    has_multi_sources = len(sources) > 1
+    has_service = _has_value_signal(df, SERVICE_COLS)
+    has_priority = _has_value_signal(df, PRIORITY_COLS)
+    has_category = _has_value_signal(df, CATEGORY_COLS)
+    has_sla = _has_value_signal(df, SLA_COLS)
+    has_resolution = _has_value_signal(df, RESOLUTION_COLS)
+    has_root_cause = _has_repeated_text_signal(df, ROOT_CAUSE_COLS)
+    has_risk = _has_value_signal(df, RISK_COLS)
+    has_reopen = _has_value_signal(df, REOPEN_COLS)
+    has_escalation = _has_value_signal(df, ESCALATION_COLS)
+    has_cluster = _has_cluster_signal(df)
+    has_outliers = _has_outlier_signal(df)
+    cluster_count = _cluster_count(df)
+    has_columns = bool(df.columns.tolist())
+
+    return [
+        {
+            "id": "scenario_overview",
+            "name": "Resumen general del escenario",
+            "applicable": True,
+            "question": "Que puedo analizar con estas fuentes?",
+        },
+        {
+            "id": "source_inventory",
+            "name": "Fuentes del escenario",
+            "applicable": has_sources,
+            "question": "Que fuentes tiene este escenario y cual conviene revisar primero?",
+        },
+        {
+            "id": "source_comparison",
+            "name": "Comparacion entre fuentes",
+            "applicable": has_multi_sources,
+            "question": "Que diferencias hay entre las fuentes cargadas?",
+        },
+        {
+            "id": "data_quality",
+            "name": "Calidad de datos",
+            "applicable": has_columns,
+            "question": "Que columnas tienen datos faltantes o problemas de calidad?",
+        },
+        {
+            "id": "columns_meaning",
+            "name": "Columnas disponibles y significado probable",
+            "applicable": has_columns,
+            "question": "Que columnas detecto la app y para que sirven?",
+        },
+        {
+            "id": "missing_assignments",
+            "name": "Registros sin servicio/prioridad/SLA",
+            "applicable": _has_any_assignment_col(df),
+            "question": "Hay registros sin servicio, prioridad o SLA asignado?",
+        },
+        {
+            "id": "critical_services",
+            "name": "Ranking de servicios criticos",
+            "applicable": has_service and (has_sla or has_resolution or has_risk or has_priority),
+            "question": "Que servicios deberia revisar primero?",
+        },
+        {
+            "id": "critical_priorities",
+            "name": "Ranking de prioridades criticas",
+            "applicable": has_priority and (has_sla or has_resolution or has_risk or has_service or has_category),
+            "question": "Que prioridades o urgencias concentran mas riesgo?",
+        },
+        {
+            "id": "sla_analysis",
+            "name": "Analisis de SLA",
+            "applicable": has_sla,
+            "question": "Como esta el incumplimiento de SLA en esta ejecucion?",
+        },
+        {
+            "id": "time_analysis",
+            "name": "Analisis de tiempos",
+            "applicable": has_resolution,
+            "question": "Donde se concentran los mayores tiempos de resolucion?",
+        },
+        {
+            "id": "outlier_analysis",
+            "name": "Analisis de outliers",
+            "applicable": has_outliers,
+            "question": "Hay casos atipicos que convenga revisar por separado?",
+        },
+        {
+            "id": "critical_clusters",
+            "name": "Clusters criticos",
+            "applicable": has_cluster,
+            "question": "Que grupos detectados deberia revisar primero?",
+        },
+        {
+            "id": "cluster_samples",
+            "name": "Muestras representativas por grupo",
+            "applicable": has_cluster,
+            "question": "Me muestras ejemplos representativos de los grupos?",
+        },
+        {
+            "id": "dashboard_findings",
+            "name": "Hallazgos para dashboard",
+            "applicable": True,
+            "question": "Que hallazgos conviene llevar al dashboard?",
+        },
+        {
+            "id": "business_recommendations",
+            "name": "Recomendaciones de negocio",
+            "applicable": has_cluster or has_service or has_sla or has_resolution or has_risk,
+            "question": "Que acciones recomendadas puedo evaluar?",
+        },
+        {
+            "id": "dynamic_questions",
+            "name": "Preguntas sugeridas dinamicas",
+            "applicable": True,
+            "question": "Que preguntas puedo hacer con los datos cargados?",
+        },
+        {
+            "id": "cluster_explanation",
+            "name": "Explicacion de un cluster concreto",
+            "applicable": has_cluster,
+            "question": "Puedes explicar un grupo concreto?",
+        },
+        {
+            "id": "cluster_comparison",
+            "name": "Comparacion entre clusters",
+            "applicable": cluster_count >= 2,
+            "question": "Que diferencias hay entre dos grupos detectados?",
+        },
+        {
+            "id": "equivalent_columns",
+            "name": "Deteccion de columnas equivalentes",
+            "applicable": has_columns,
+            "question": "Que columnas parecen equivalentes a servicio, prioridad, SLA o tiempo?",
+        },
+        {
+            "id": "next_steps",
+            "name": "Guia de proximos pasos para usuario inexperto",
+            "applicable": True,
+            "question": "Por donde empiezo y que debo revisar paso a paso?",
+        },
+    ]
+
+
+def _applicable_tools(df: pd.DataFrame, run_context: dict | None = None) -> list[dict[str, object]]:
+    return [tool for tool in _tool_catalog(df, run_context) if bool(tool["applicable"])]
+
+
+def build_suggested_questions_for_run(run_id: str, run_context: dict | None = None) -> list[str]:
     df = load_run_evidences(run_id)
     if df.empty:
         return FALLBACK_SUGGESTED_QUESTIONS
-    return _suggested_questions_for_df(df)
+    return _suggested_questions_for_df(df, run_context=run_context)
 
 
-def _suggested_questions_for_df(df: pd.DataFrame) -> list[str]:
-    questions: list[str] = ["Que puedo analizar con estas fuentes?"]
-
-    has_service = _has_col(df, SERVICE_COLS)
-    has_priority = _has_col(df, PRIORITY_COLS)
-    has_category = _has_col(df, CATEGORY_COLS)
-    has_sla = _has_col(df, SLA_COLS)
-    has_resolution = _has_col(df, RESOLUTION_COLS)
-    has_root_cause = _has_col(df, ROOT_CAUSE_COLS)
-    has_risk = _has_col(df, RISK_COLS)
-    has_reopen = _has_col(df, REOPEN_COLS)
-    has_escalation = _has_col(df, ESCALATION_COLS)
-    has_cluster = "cluster_label" in df.columns
-
-    if has_sla and has_service:
-        questions.append("Que servicios concentran mas incumplimiento de SLA?")
-    elif has_sla:
-        questions.append("Como esta el incumplimiento de SLA en esta ejecucion?")
-
-    if has_resolution and has_service:
-        questions.append("Que servicios tardan mas en resolverse?")
-    elif has_resolution:
-        questions.append("Donde se concentran los mayores tiempos de resolucion?")
-
-    if has_priority and (has_service or has_category):
-        questions.append("Que grupos tienen mayor urgencia o prioridad?")
-    elif has_priority:
-        questions.append("Como se distribuyen las incidencias por prioridad?")
-
-    if has_risk:
-        questions.append("Que grupos tienen mayor impacto o riesgo operativo?")
-
-    if has_root_cause:
-        questions.append("Que causas raiz se repiten con mayor frecuencia?")
-
-    if has_reopen:
-        questions.append("Que patrones aparecen en los casos reabiertos?")
-
-    if has_escalation:
-        questions.append("Que grupos tienen mas escalaciones?")
-
-    if has_cluster:
-        questions.append("Que grupos detectados deberia revisar primero?")
-        questions.append("Hay casos atipicos que convenga revisar por separado?")
-
-    questions.append("Que hallazgos conviene llevar al dashboard?")
+def _suggested_questions_for_df(
+    df: pd.DataFrame,
+    run_context: dict | None = None,
+) -> list[str]:
+    questions: list[str] = [
+        str(tool["question"])
+        for tool in _applicable_tools(df, run_context)
+        if tool.get("question")
+    ]
 
     deduped: list[str] = []
     for question in questions:
@@ -198,6 +390,7 @@ def _group_mean(
             metric_col: _numeric_series(df, metric_col),
         }
     ).dropna()
+    filtered = filtered[~_missing_mask(filtered[group_col])]
     if filtered.empty:
         return pd.DataFrame()
     return (
@@ -213,6 +406,7 @@ def _group_count(df: pd.DataFrame, group_col: str, *, top_n: int = 3) -> pd.Data
     if group_col not in df.columns:
         return pd.DataFrame()
     filtered = df[[group_col]].dropna()
+    filtered = filtered[~_missing_mask(filtered[group_col])]
     if filtered.empty:
         return pd.DataFrame()
     return (
@@ -242,6 +436,28 @@ def _safe_slug(value: object) -> str:
 def _add_unique(insights: list[InsightCandidate], item: InsightCandidate) -> None:
     if not any(existing.id == item.id for existing in insights):
         insights.append(item)
+
+
+def _missing_mask(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
+        return series.isna()
+    cleaned = series.astype(str).str.strip().str.lower()
+    return series.isna() | cleaned.isin(
+        {
+            "",
+            "nan",
+            "none",
+            "null",
+            "sin dato",
+            "sin asignar",
+            "no asignado",
+            "no asignada",
+            "no aplica",
+            "n/a",
+            "unknown",
+            "-",
+        }
+    )
 
 
 def _tool_summary(
@@ -300,6 +516,174 @@ def _overview(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
             filter_value="current",
         )
     ]
+    return answer, insights
+
+
+def _source_type_label(source_type: str | None) -> str:
+    if not source_type:
+        return "fuente analizada"
+    return SOURCE_TYPE_LABELS.get(str(source_type), str(source_type).replace("_", " "))
+
+
+def _source_review_answer(
+    df: pd.DataFrame,
+    run_context: dict | None = None,
+) -> tuple[str, list[InsightCandidate]]:
+    run_context = run_context or {}
+    source_name = str(run_context.get("source_name") or "").strip()
+    source_type = _source_type_label(run_context.get("source_type"))
+    project_name = str(run_context.get("project_name") or "").strip()
+    project_strategy = str(run_context.get("project_strategy") or "").strip()
+    active_source_id = str(run_context.get("source_id") or "").strip()
+    scenario_sources = [
+        item
+        for item in (run_context.get("sources") or [])
+        if isinstance(item, dict)
+    ]
+
+    source_col = _first_col(df, SOURCE_COLS)
+    source_counts = _group_count(df, source_col, top_n=5) if source_col else pd.DataFrame()
+    if not source_name and not source_counts.empty:
+        first = source_counts.iloc[0]
+        raw_name = str(first[source_col]).strip()
+        if raw_name and raw_name.lower() not in {"tabular", "texto", "imagen", "multimodal"}:
+            source_name = raw_name
+
+    avg_sla = _mean(df, SLA_COLS)
+    avg_resolution = _mean(df, RESOLUTION_COLS)
+    avg_risk = _mean(df, RISK_COLS)
+    service = _top_value(df, SERVICE_COLS)
+    priority = _top_value(df, PRIORITY_COLS)
+    category = _top_value(df, CATEGORY_COLS)
+    outliers = int((df["cluster_label"] == -1).sum()) if "cluster_label" in df else 0
+    clusters = (
+        int(df[df["cluster_label"] >= 0]["cluster_label"].nunique())
+        if "cluster_label" in df
+        else 0
+    )
+
+    active_source = None
+    if scenario_sources:
+        for item in scenario_sources:
+            if active_source_id and str(item.get("id") or "") == active_source_id:
+                active_source = item
+                break
+        if active_source is None and source_name:
+            for item in scenario_sources:
+                if str(item.get("source_name") or "").strip() == source_name:
+                    active_source = item
+                    break
+
+    if active_source and not source_name:
+        source_name = str(active_source.get("source_name") or active_source.get("filename") or "").strip()
+
+    if scenario_sources:
+        source_intro = (
+            f"El escenario tiene {len(scenario_sources)} fuentes cargadas"
+        )
+        if project_name:
+            source_intro += f" en el proyecto \"{project_name}\""
+        if source_name:
+            source_intro += f". La ejecucion abierta ahora corresponde a \"{source_name}\""
+        else:
+            source_intro += ". La ejecucion abierta corresponde a una fuente tabular"
+    elif source_name:
+        source_intro = f"La fuente a revisar para esta ejecucion es \"{source_name}\""
+    else:
+        source_intro = "No tengo el nombre original del archivo en DuckDB; esta ejecucion aparece como fuente tabular"
+    if project_name:
+        source_intro += "" if scenario_sources else f" del proyecto \"{project_name}\""
+
+    focus_parts = [
+        f"{len(df)} registros analizados",
+        f"{clusters} grupos detectados" if clusters else "grupos sin dato",
+        f"{outliers} casos atipicos",
+        f"SLA {_fmt_pct(avg_sla)}",
+        f"tiempo medio {_fmt_hours(avg_resolution)}",
+        f"riesgo {_fmt_number(avg_risk)}",
+    ]
+    business_focus = []
+    if service:
+        business_focus.append(f"servicio {service}")
+    if category:
+        business_focus.append(f"categoria {category}")
+    if priority:
+        business_focus.append(f"prioridad {priority}")
+
+    answer = (
+        f"{source_intro}. Para esta ejecucion, la fuente activa es de tipo {source_type}. "
+        f"Conviene revisar esta ejecucion mirando primero: {', '.join(focus_parts)}. "
+    )
+    if scenario_sources:
+        source_lines = []
+        for index, item in enumerate(scenario_sources[:8], start=1):
+            name = str(item.get("source_name") or item.get("filename") or f"fuente {index}").strip()
+            kind = _source_type_label(item.get("source_type"))
+            rows = item.get("n_rows")
+            fmt = str(item.get("original_format") or "").strip().upper()
+            status = str(item.get("processing_status") or "").strip()
+            details = [kind]
+            if fmt:
+                details.append(fmt)
+            if rows is not None:
+                details.append(f"{rows} filas")
+            if status:
+                details.append(status)
+            marker = "actual" if active_source_id and str(item.get("id") or "") == active_source_id else None
+            suffix = f" ({marker})" if marker else ""
+            source_lines.append(f"{index}) {name}{suffix}: " + ", ".join(details))
+        answer += " Fuentes del escenario: " + "; ".join(source_lines) + ". "
+        if len(scenario_sources) > 8:
+            answer += f"Hay {len(scenario_sources) - 8} fuentes adicionales no listadas en esta respuesta. "
+        if project_strategy == "per_source":
+            answer += (
+                "Como el escenario esta en modo analisis por fuente, cada archivo tabular genera una ejecucion. "
+                "Para comparar todas, revisa el historial del proyecto o ejecuta una estrategia unificada si aplica. "
+            )
+        elif project_strategy == "unified":
+            answer += "Como el escenario esta en modo unificado, la lectura debe priorizar la fuente principal combinada. "
+    if business_focus:
+        answer += "Dentro de esa fuente, el primer foco de negocio seria " + ", ".join(business_focus) + ". "
+    answer += (
+        "No tomes esta recomendacion como una decision automatica: es una guia para revisar las fuentes y los grupos detectados."
+    )
+
+    insights = []
+    if scenario_sources:
+        for index, item in enumerate(scenario_sources[:5], start=1):
+            name = str(item.get("source_name") or item.get("filename") or f"fuente {index}").strip()
+            rows = item.get("n_rows")
+            insights.append(
+                InsightCandidate(
+                    id=f"source-review-{_safe_slug(name)}",
+                    title=f"Fuente del escenario: {name}",
+                    description=(
+                        f"{name} contiene {rows or 'sin dato'} filas. "
+                        "Revisar estado, columnas detectadas y ejecuciones asociadas."
+                    ),
+                    metric_label="records",
+                    metric_value=_finite(rows),
+                    dimension="source",
+                    filter_kind="source",
+                    filter_value=name,
+                )
+            )
+    if not insights:
+        insights.append(
+            InsightCandidate(
+                id=f"source-review-{_safe_slug(source_name or source_type)}",
+                title=f"Fuente a revisar: {source_name or source_type}",
+                description=(
+                    f"{source_name or source_type} contiene {len(df)} registros analizados; "
+                    f"prioriza SLA, tiempos, casos atipicos y los grupos con mayor riesgo."
+                ),
+                metric_label="records",
+                metric_value=_finite(len(df)),
+                dimension="source",
+                filter_kind="source",
+                filter_value=source_name or source_type,
+            )
+        )
     return answer, insights
 
 
@@ -603,6 +987,608 @@ def _clusters_answer(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
     return answer, insights
 
 
+def _missing_assignment_answer(
+    df: pd.DataFrame,
+    run_context: dict | None = None,
+) -> tuple[str, list[InsightCandidate]]:
+    service_col = _first_col(df, SERVICE_COLS)
+    priority_col = _first_col(df, PRIORITY_COLS)
+    source_name = str((run_context or {}).get("source_name") or "").strip()
+    sources = [
+        item
+        for item in ((run_context or {}).get("sources") or [])
+        if isinstance(item, dict)
+    ]
+
+    if not service_col and not priority_col:
+        source_hint = f" En la ejecucion abierta figura la fuente {source_name}." if source_name else ""
+        if sources:
+            source_names = [
+                str(item.get("source_name") or item.get("filename") or "").strip()
+                for item in sources[:5]
+            ]
+            source_names = [name for name in source_names if name]
+            if source_names:
+                source_hint += " Fuentes del escenario: " + "; ".join(source_names) + "."
+        return (
+            "No encontre columnas equivalentes a servicio afectado ni prioridad en esta ejecucion. "
+            "Por eso no puedo contar registros sin asignacion; primero hay que revisar el perfilado de columnas "
+            "y confirmar que campos del archivo representan servicio y prioridad." + source_hint,
+            [],
+        )
+
+    service_missing = (
+        _missing_mask(df[service_col])
+        if service_col
+        else pd.Series([True] * len(df), index=df.index)
+    )
+    priority_missing = (
+        _missing_mask(df[priority_col])
+        if priority_col
+        else pd.Series([True] * len(df), index=df.index)
+    )
+    both_missing = service_missing & priority_missing
+    either_missing = service_missing | priority_missing
+    missing_df = df[both_missing]
+    either_df = df[either_missing]
+
+    pieces = [
+        f"registros analizados: {len(df)}",
+        f"sin servicio: {int(service_missing.sum())}" if service_col else "servicio: columna no detectada",
+        f"sin prioridad: {int(priority_missing.sum())}" if priority_col else "prioridad: columna no detectada",
+        f"sin servicio y sin prioridad: {int(both_missing.sum())}",
+        f"con algun faltante: {int(either_missing.sum())}",
+    ]
+
+    where_to_review = []
+    if source_name:
+        where_to_review.append(f"fuente actual: {source_name}")
+    if service_col:
+        where_to_review.append(f"columna de servicio: {service_col}")
+    if priority_col:
+        where_to_review.append(f"columna de prioridad: {priority_col}")
+    id_col = _first_col(df, ("evidence_id", "incident_id", "id"))
+    if id_col and not missing_df.empty:
+        examples = _clean_text_series(missing_df[id_col]).head(5).tolist()
+        if examples:
+            where_to_review.append("ejemplos: " + ", ".join(examples))
+
+    cluster_detail = ""
+    if "cluster_label" in df.columns and not missing_df.empty:
+        top_clusters = _group_count(missing_df, "cluster_label", top_n=3)
+        if not top_clusters.empty:
+            cluster_detail = " Se concentran principalmente en " + "; ".join(
+                f"grupo {row['cluster_label']} ({int(row['count'])})"
+                for _, row in top_clusters.iterrows()
+            ) + "."
+
+    if missing_df.empty:
+        answer = (
+            "No encontre registros que esten sin servicio y sin prioridad al mismo tiempo. "
+            "Resumen de calidad de asignacion: " + "; ".join(pieces) + ". "
+        )
+    else:
+        answer = (
+            "Si hay registros sin servicio y sin prioridad. "
+            "Resumen de calidad de asignacion: " + "; ".join(pieces) + ". "
+        )
+    if where_to_review:
+        answer += "Revisalo en " + "; ".join(where_to_review) + ". "
+    answer += (
+        cluster_detail
+        + " Siguiente paso: abrir una muestra de esos registros, validar si el faltante es real o viene de un mapeo de columnas, "
+        "y luego decidir si conviene corregir la fuente o crear una regla de normalizacion."
+    )
+
+    insights = [
+        InsightCandidate(
+            id="quality-missing-service-priority",
+            title="Registros sin servicio y prioridad",
+            description=(
+                f"{int(both_missing.sum())} registros no tienen servicio ni prioridad asignados. "
+                "Revisar mapeo de columnas y muestra de tickets."
+            ),
+            metric_label="missing_service_priority",
+            metric_value=_finite(both_missing.sum()),
+            dimension="data_quality",
+            filter_kind="data_quality",
+            filter_value="missing_service_priority",
+        )
+    ]
+    if int(either_missing.sum()) != int(both_missing.sum()):
+        insights.append(
+            InsightCandidate(
+                id="quality-any-missing-assignment",
+                title="Registros con algun dato de asignacion faltante",
+                description=f"{int(either_missing.sum())} registros tienen servicio o prioridad sin informar.",
+                metric_label="missing_assignment_any",
+                metric_value=_finite(either_missing.sum()),
+                dimension="data_quality",
+                filter_kind="data_quality",
+                filter_value="missing_assignment_any",
+            )
+        )
+    return answer, insights
+
+
+def _dashboard_findings_answer(
+    df: pd.DataFrame,
+    run_context: dict | None = None,
+) -> tuple[str, list[InsightCandidate]]:
+    candidates: list[InsightCandidate] = []
+
+    def add_from(result: tuple[str, list[InsightCandidate]]) -> None:
+        for item in result[1]:
+            _add_unique(candidates, item)
+
+    add_from(_decision_alternatives(df))
+    if _has_cluster_signal(df):
+        add_from(_clusters_answer(df))
+    if _has_outlier_signal(df):
+        add_from(_anomalies_answer(df))
+    if _has_value_signal(df, SLA_COLS):
+        add_from(_sla_answer(df, "sla"))
+    if _has_value_signal(df, RESOLUTION_COLS):
+        add_from(_resolution_answer(df, "tiempo"))
+    if _has_value_signal(df, SERVICE_COLS):
+        add_from(_services_answer(df))
+    if _has_repeated_text_signal(df, ROOT_CAUSE_COLS):
+        add_from(_root_cause_answer(df))
+    if run_context and run_context.get("sources"):
+        add_from(_source_review_answer(df, run_context))
+
+    if not candidates:
+        return (
+            "Todavia no hay hallazgos suficientemente claros para llevar al dashboard. "
+            "Primero revisaria calidad de datos, columnas detectadas y grupos generados.",
+            [],
+        )
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: item.metric_value if item.metric_value is not None else 0,
+        reverse=True,
+    )[:5]
+    pieces = [
+        f"{index + 1}) {item.title}: {item.description}"
+        for index, item in enumerate(ranked)
+    ]
+    answer = (
+        "Para el dashboard llevaria estos hallazgos porque son los mas accionables con los datos disponibles: "
+        + " ".join(pieces)
+        + " Siguiente paso: agrega solo los hallazgos que quieras explicar en el informe y usa el chat para pedir detalle de cada uno."
+    )
+    return answer, ranked
+
+
+def _dynamic_questions_answer(
+    df: pd.DataFrame,
+    run_context: dict | None = None,
+) -> tuple[str, list[InsightCandidate]]:
+    tools = _applicable_tools(df, run_context)
+    questions = [str(tool["question"]) for tool in tools[:10] if tool.get("question")]
+    tool_names = [str(tool["name"]) for tool in tools[:10]]
+    answer = (
+        "Con las fuentes y columnas disponibles, estas son preguntas que la app puede responder con datos reales: "
+        + "; ".join(questions)
+        + ". Si preguntas por algo que no aparece, el asistente intentara resolverlo y te dira que dato falta si no es posible."
+    )
+    insights = [
+        InsightCandidate(
+            id="available-analytic-tools",
+            title="Herramientas analiticas disponibles",
+            description="Herramientas aplicables: " + "; ".join(tool_names),
+            metric_label="available_tools",
+            metric_value=_finite(len(tools)),
+            dimension="assistant",
+            filter_kind="tool_catalog",
+            filter_value="available",
+        )
+    ]
+    return answer, insights
+
+
+def _columns_meaning_answer(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
+    groups = [
+        ("servicio", SERVICE_COLS, "permite ubicar el area, aplicacion o servicio afectado"),
+        ("prioridad/severidad", PRIORITY_COLS, "sirve para ordenar urgencia o criticidad"),
+        ("categoria", CATEGORY_COLS, "ayuda a describir el tipo de incidencia o dominio"),
+        ("SLA", SLA_COLS, "permite medir incumplimiento o riesgo de servicio"),
+        ("tiempo", RESOLUTION_COLS, "permite medir demora o esfuerzo de resolucion"),
+        ("causa raiz", ROOT_CAUSE_COLS, "sirve para detectar motivos repetidos"),
+        ("riesgo/impacto", RISK_COLS, "sirve para priorizar impacto de negocio"),
+        ("canal/asignacion", CHANNEL_COLS, "ayuda a entender entrada o equipo responsable"),
+    ]
+    detected = []
+    for label, aliases, meaning in groups:
+        cols = [col for col in aliases if col in df.columns]
+        if cols:
+            detected.append(f"{label}: {', '.join(cols)} ({meaning})")
+
+    other_cols = [
+        col
+        for col in df.columns
+        if col not in {"run_id", "evidence_index", "x", "y", "cluster_label"}
+    ][:12]
+    if not detected:
+        answer = (
+            "Detecte columnas, pero no pude asociarlas claramente a servicio, prioridad, SLA, tiempos o causa raiz. "
+            "Conviene revisar el diccionario de datos o mapear columnas equivalentes."
+        )
+    else:
+        answer = (
+            "Estas columnas parecen utiles para el analisis: "
+            + "; ".join(detected)
+            + ". Otras columnas disponibles para revisar: "
+            + ", ".join(other_cols)
+            + "."
+        )
+    insights = [
+        InsightCandidate(
+            id="columns-detected",
+            title="Columnas detectadas",
+            description=f"La ejecucion tiene {len(df.columns)} columnas; {len(detected)} grupos semanticos reconocidos.",
+            metric_label="column_count",
+            metric_value=_finite(len(df.columns)),
+            dimension="schema",
+            filter_kind="columns",
+            filter_value="detected",
+        )
+    ]
+    return answer, insights
+
+
+def _data_quality_answer(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
+    rows = []
+    for col in df.columns:
+        if col in {"run_id", "evidence_index", "x", "y"}:
+            continue
+        missing = int(_missing_mask(df[col]).sum())
+        missing_rate = missing / len(df) if len(df) else 0
+        if missing > 0:
+            rows.append((col, missing, missing_rate))
+    rows = sorted(rows, key=lambda item: (item[2], item[1]), reverse=True)[:8]
+    if not rows:
+        return (
+            "No detecte faltantes relevantes en las columnas principales de esta ejecucion. Igual conviene revisar tipos de datos y valores atipicos.",
+            [],
+        )
+    pieces = [
+        f"{col}: {missing} registros ({rate * 100:.1f}%)"
+        for col, missing, rate in rows
+    ]
+    answer = (
+        "Las columnas con mas datos faltantes o no informados son "
+        + "; ".join(pieces)
+        + ". Siguiente paso: abrir el detalle de esas columnas en la fuente original y decidir si se corrigen, se imputan o se excluyen del analisis."
+    )
+    insights = [
+        InsightCandidate(
+            id=f"quality-missing-{_safe_slug(col)}",
+            title=f"Faltantes en {col}",
+            description=f"{missing} registros sin valor util en {col}.",
+            metric_label="missing_rate",
+            metric_value=_finite(rate),
+            dimension="data_quality",
+            filter_kind="column",
+            filter_value=col,
+        )
+        for col, missing, rate in rows[:5]
+    ]
+    return answer, insights
+
+
+def _source_comparison_answer(
+    df: pd.DataFrame,
+    run_context: dict | None = None,
+) -> tuple[str, list[InsightCandidate]]:
+    sources = _scenario_sources(run_context)
+    if len(sources) < 2:
+        return (
+            "Esta ejecucion no tiene suficientes fuentes de escenario para comparar. Carga dos o mas fuentes en el proyecto para activar esta lectura.",
+            [],
+        )
+    rows = []
+    for item in sources:
+        name = str(item.get("source_name") or item.get("filename") or "fuente").strip()
+        kind = _source_type_label(item.get("source_type"))
+        n_rows = item.get("n_rows")
+        n_cols = item.get("n_cols")
+        fmt = str(item.get("original_format") or "").upper()
+        rows.append((name, kind, n_rows, n_cols, fmt))
+    pieces = [
+        f"{name}: {kind}, {n_rows or 'sin dato'} filas, {n_cols or 'sin dato'} columnas, {fmt or 'formato sin dato'}"
+        for name, kind, n_rows, n_cols, fmt in rows[:8]
+    ]
+    answer = (
+        "Comparacion de fuentes del escenario: "
+        + "; ".join(pieces)
+        + ". Para una comparacion analitica completa, revisa las ejecuciones generadas por cada fuente y compara clusters, faltantes y metricas."
+    )
+    insights = [
+        InsightCandidate(
+            id=f"source-compare-{_safe_slug(name)}",
+            title=f"Fuente: {name}",
+            description=f"{kind}, {n_rows or 'sin dato'} filas y {n_cols or 'sin dato'} columnas.",
+            metric_label="source_rows",
+            metric_value=_finite(n_rows),
+            dimension="source",
+            filter_kind="source",
+            filter_value=name,
+        )
+        for name, kind, n_rows, n_cols, _fmt in rows[:5]
+    ]
+    return answer, insights
+
+
+def _critical_services_answer(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
+    service_col = _first_col(df, SERVICE_COLS)
+    if not service_col:
+        return ("No encontre una columna de servicio para construir un ranking critico.", [])
+    rows = []
+    for service, group in df.groupby(service_col, dropna=True):
+        if _missing_mask(pd.Series([service])).iloc[0]:
+            continue
+        count = len(group)
+        score = _decision_score(
+            sla=_mean(group, SLA_COLS),
+            resolution=_mean(group, RESOLUTION_COLS),
+            risk=_mean(group, RISK_COLS),
+            count=count,
+        )
+        rows.append((str(service), count, score, _mean(group, SLA_COLS), _mean(group, RESOLUTION_COLS)))
+    rows = sorted(rows, key=lambda item: item[2], reverse=True)[:5]
+    if not rows:
+        return ("No hay datos suficientes para ordenar servicios criticos.", [])
+    answer = "Servicios a revisar primero: " + "; ".join(
+        f"{name}: {count} registros, score {_fmt_number(score)}, SLA {_fmt_pct(sla)}, tiempo {_fmt_hours(time)}"
+        for name, count, score, sla, time in rows
+    ) + "."
+    insights = [
+        InsightCandidate(
+            id=f"critical-service-{_safe_slug(name)}",
+            title=f"Servicio critico: {name}",
+            description=f"{name} combina volumen, SLA, tiempo o riesgo con score {_fmt_number(score)}.",
+            metric_label="critical_service_score",
+            metric_value=_finite(score),
+            dimension=service_col,
+            filter_kind=service_col,
+            filter_value=name,
+        )
+        for name, _count, score, _sla, _time in rows
+    ]
+    return answer, insights
+
+
+def _critical_priorities_answer(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
+    priority_col = _first_col(df, PRIORITY_COLS)
+    if not priority_col:
+        return ("No encontre una columna de prioridad o severidad para construir ranking.", [])
+    rows = []
+    for priority, group in df.groupby(priority_col, dropna=True):
+        if _missing_mask(pd.Series([priority])).iloc[0]:
+            continue
+        score = _decision_score(
+            sla=_mean(group, SLA_COLS),
+            resolution=_mean(group, RESOLUTION_COLS),
+            risk=_mean(group, RISK_COLS),
+            count=len(group),
+        )
+        rows.append((str(priority), len(group), score, _mean(group, SLA_COLS), _mean(group, RESOLUTION_COLS)))
+    rows = sorted(rows, key=lambda item: item[2], reverse=True)[:5]
+    if not rows:
+        return ("No hay datos suficientes para ordenar prioridades criticas.", [])
+    answer = "Prioridades o urgencias a revisar primero: " + "; ".join(
+        f"{name}: {count} registros, score {_fmt_number(score)}, SLA {_fmt_pct(sla)}, tiempo {_fmt_hours(time)}"
+        for name, count, score, sla, time in rows
+    ) + "."
+    insights = [
+        InsightCandidate(
+            id=f"critical-priority-{_safe_slug(name)}",
+            title=f"Prioridad critica: {name}",
+            description=f"{name} tiene {count} registros y score {_fmt_number(score)}.",
+            metric_label="critical_priority_score",
+            metric_value=_finite(score),
+            dimension=priority_col,
+            filter_kind=priority_col,
+            filter_value=name,
+        )
+        for name, count, score, _sla, _time in rows
+    ]
+    return answer, insights
+
+
+def _cluster_rows(df: pd.DataFrame) -> list[dict[str, object]]:
+    if "cluster_label" not in df.columns:
+        return []
+    rows = []
+    for cluster_label, group in df[df["cluster_label"] >= 0].groupby("cluster_label"):
+        rows.append(
+            {
+                "cluster_label": int(cluster_label),
+                "count": len(group),
+                "service": _top_value(group, SERVICE_COLS),
+                "priority": _top_value(group, PRIORITY_COLS),
+                "category": _top_value(group, CATEGORY_COLS),
+                "sla": _mean(group, SLA_COLS),
+                "resolution": _mean(group, RESOLUTION_COLS),
+                "risk": _mean(group, RISK_COLS),
+                "df": group,
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: _decision_score(
+            sla=row["sla"], resolution=row["resolution"], risk=row["risk"], count=row["count"]
+        ),
+        reverse=True,
+    )
+
+
+def _extract_cluster_ids(question: str) -> list[int]:
+    return [int(value) for value in re.findall(r"(?:cluster|grupo)\s*#?\s*(-?\d+)", question)]
+
+
+def _cluster_sample_answer(df: pd.DataFrame, question: str) -> tuple[str, list[InsightCandidate]]:
+    rows = _cluster_rows(df)
+    if not rows:
+        return ("No encontre grupos con etiquetas de cluster para mostrar muestras.", [])
+    requested = _extract_cluster_ids(question)
+    row = next((item for item in rows if item["cluster_label"] in requested), rows[0])
+    group = row["df"]
+    id_col = _first_col(group, ("evidence_id", "incident_id", "id"))
+    preview_col = _first_col(group, ("preview", "descripcion_corta", "description"))
+    samples = []
+    for _, item in group.head(5).iterrows():
+        sample_id = str(item.get(id_col, "")) if id_col else ""
+        preview = str(item.get(preview_col, ""))[:120] if preview_col else ""
+        samples.append(f"{sample_id or 'registro'}: {preview or 'sin vista previa'}")
+    answer = (
+        f"Muestra del grupo {row['cluster_label']} ({row['count']} registros): "
+        + "; ".join(samples)
+        + ". Usa estos ejemplos para validar si el patron del grupo tiene sentido para negocio."
+    )
+    return answer, [
+        InsightCandidate(
+            id=f"cluster-sample-{row['cluster_label']}",
+            title=f"Muestra del grupo {row['cluster_label']}",
+            description=f"{row['count']} registros; servicio {row['service'] or 'sin dato'}; prioridad {row['priority'] or 'sin dato'}.",
+            metric_label="cluster_records",
+            metric_value=_finite(row["count"]),
+            dimension="cluster_label",
+            filter_kind="cluster_label",
+            filter_value=str(row["cluster_label"]),
+        )
+    ]
+
+
+def _cluster_explanation_answer(df: pd.DataFrame, question: str) -> tuple[str, list[InsightCandidate]]:
+    rows = _cluster_rows(df)
+    if not rows:
+        return ("No encontre grupos con etiquetas de cluster para explicar.", [])
+    requested = _extract_cluster_ids(question)
+    row = next((item for item in rows if item["cluster_label"] in requested), rows[0])
+    answer = (
+        f"El grupo {row['cluster_label']} contiene {row['count']} registros. "
+        f"Patron dominante: servicio {row['service'] or 'sin dato'}, prioridad {row['priority'] or 'sin dato'}, "
+        f"categoria {row['category'] or 'sin dato'}, SLA {_fmt_pct(row['sla'])}, tiempo {_fmt_hours(row['resolution'])} "
+        f"y riesgo {_fmt_number(row['risk'])}. Recomendacion: revisar una muestra y validar si el nombre de negocio del grupo es correcto."
+    )
+    return answer, [
+        InsightCandidate(
+            id=f"cluster-explain-{row['cluster_label']}",
+            title=f"Explicacion del grupo {row['cluster_label']}",
+            description=f"Servicio {row['service'] or 'sin dato'}, prioridad {row['priority'] or 'sin dato'}, {row['count']} registros.",
+            metric_label="cluster_records",
+            metric_value=_finite(row["count"]),
+            dimension="cluster_label",
+            filter_kind="cluster_label",
+            filter_value=str(row["cluster_label"]),
+        )
+    ]
+
+
+def _cluster_comparison_answer(df: pd.DataFrame, question: str) -> tuple[str, list[InsightCandidate]]:
+    rows = _cluster_rows(df)
+    if len(rows) < 2:
+        return ("Necesito al menos dos grupos detectados para comparar clusters.", [])
+    requested = _extract_cluster_ids(question)
+    selected = [row for row in rows if row["cluster_label"] in requested][:2]
+    if len(selected) < 2:
+        selected = rows[:2]
+    first, second = selected
+    answer = (
+        f"Comparacion de grupos: grupo {first['cluster_label']} tiene {first['count']} registros, "
+        f"servicio {first['service'] or 'sin dato'}, prioridad {first['priority'] or 'sin dato'}, "
+        f"SLA {_fmt_pct(first['sla'])} y tiempo {_fmt_hours(first['resolution'])}. "
+        f"Grupo {second['cluster_label']} tiene {second['count']} registros, servicio {second['service'] or 'sin dato'}, "
+        f"prioridad {second['priority'] or 'sin dato'}, SLA {_fmt_pct(second['sla'])} y tiempo {_fmt_hours(second['resolution'])}. "
+        "Usa esta comparacion para decidir cual revisar primero o si ambos representan perfiles distintos."
+    )
+    insights = [
+        InsightCandidate(
+            id=f"cluster-compare-{row['cluster_label']}",
+            title=f"Grupo {row['cluster_label']}",
+            description=f"{row['count']} registros; servicio {row['service'] or 'sin dato'}; prioridad {row['priority'] or 'sin dato'}.",
+            metric_label="cluster_records",
+            metric_value=_finite(row["count"]),
+            dimension="cluster_label",
+            filter_kind="cluster_label",
+            filter_value=str(row["cluster_label"]),
+        )
+        for row in selected
+    ]
+    return answer, insights
+
+
+def _equivalent_columns_answer(df: pd.DataFrame) -> tuple[str, list[InsightCandidate]]:
+    groups = [
+        ("servicio", SERVICE_COLS),
+        ("prioridad/severidad", PRIORITY_COLS),
+        ("SLA", SLA_COLS),
+        ("tiempo de resolucion", RESOLUTION_COLS),
+        ("causa raiz", ROOT_CAUSE_COLS),
+        ("riesgo/impacto", RISK_COLS),
+        ("categoria", CATEGORY_COLS),
+    ]
+    pieces = []
+    for label, aliases in groups:
+        matches = [col for col in df.columns if col in aliases]
+        if matches:
+            pieces.append(f"{label}: {', '.join(matches)}")
+    unmatched = [
+        col
+        for col in df.columns
+        if col not in {"run_id", "evidence_index", "x", "y", "cluster_label"}
+        and not any(col in aliases for _, aliases in groups)
+    ][:10]
+    answer = (
+        "Mapeo automatico de columnas equivalentes: "
+        + ("; ".join(pieces) if pieces else "no encontre equivalencias fuertes")
+        + ". Columnas que podrian requerir revision manual: "
+        + (", ".join(unmatched) if unmatched else "ninguna destacada")
+        + "."
+    )
+    return answer, [
+        InsightCandidate(
+            id="equivalent-columns",
+            title="Columnas equivalentes detectadas",
+            description=f"{len(pieces)} grupos de equivalencias detectados.",
+            metric_label="equivalence_groups",
+            metric_value=_finite(len(pieces)),
+            dimension="schema",
+            filter_kind="columns",
+            filter_value="equivalent",
+        )
+    ]
+
+
+def _next_steps_answer(df: pd.DataFrame, run_context: dict | None = None) -> tuple[str, list[InsightCandidate]]:
+    steps = ["1) Revisa que fuentes y columnas detecto la app."]
+    if _has_any_assignment_col(df):
+        steps.append("2) Revisa calidad de datos: servicio, prioridad y SLA faltantes.")
+    else:
+        steps.append("2) Mapea columnas equivalentes para servicio, prioridad y SLA si existen en la fuente.")
+    if _has_cluster_signal(df):
+        steps.append("3) Abre los grupos mas criticos y valida una muestra de tickets.")
+    if _has_outlier_signal(df):
+        steps.append("4) Revisa los casos atipicos por separado.")
+    steps.append("5) Lleva al dashboard solo hallazgos que puedas explicar con datos reales.")
+    answer = "Guia sugerida para empezar: " + " ".join(steps)
+    return answer, [
+        InsightCandidate(
+            id="guided-next-steps",
+            title="Guia de proximos pasos",
+            description="Ruta sugerida para revisar el escenario sin conocimientos tecnicos previos.",
+            metric_label="steps",
+            metric_value=_finite(len(steps)),
+            dimension="assistant",
+            filter_kind="guide",
+            filter_value="next_steps",
+        )
+    ]
+
+
 def _decision_score(
     *,
     sla: float | None = None,
@@ -774,7 +1760,13 @@ def _decision_alternatives(df: pd.DataFrame) -> tuple[str, list[InsightCandidate
     return answer, alternatives
 
 
-def build_chat_response(run_id: str, question: str) -> ChatResponse:
+def build_chat_response(
+    run_id: str,
+    question: str,
+    *,
+    run_context: dict | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> ChatResponse:
     df = load_run_evidences(run_id)
     if df.empty:
         return ChatResponse(
@@ -783,7 +1775,7 @@ def build_chat_response(run_id: str, question: str) -> ChatResponse:
         )
 
     normalized = _normalize(question)
-    suggested_questions = _suggested_questions_for_df(df)
+    suggested_questions = _suggested_questions_for_df(df, run_context=run_context)
     answer_parts: list[str] = []
     insights: list[InsightCandidate] = []
     tool_summaries: list[dict] = []
@@ -795,46 +1787,158 @@ def build_chat_response(run_id: str, question: str) -> ChatResponse:
         for item in items:
             _add_unique(insights, item)
 
-    if any(term in normalized for term in ["que puedo", "analizar", "explorar"]):
+    def has_any(*terms: str) -> bool:
+        return any(term in normalized for term in terms)
+
+    asks_dashboard = "dashboard" in normalized or (
+        "hallazgo" in normalized
+        and any(term in normalized for term in ["llevar", "agregar", "mostrar", "conviene"])
+    )
+    asks_missing_assignment = (
+        any(
+            term in normalized
+            for term in [
+                "sin servicio",
+                "sin prioridad",
+                "sin asignar",
+                "no asignado",
+                "no asignada",
+                "no tienen asignado",
+                "no tiene asignado",
+                "faltante",
+                "faltan",
+                "no informado",
+                "no informada",
+            ]
+        )
+        and any(term in normalized for term in ["servicio", "prioridad", "asignacion"])
+    )
+
+    asks_dynamic_questions = (
+        has_any("que preguntas", "preguntas puedo", "puedo preguntar", "preguntas sugeridas")
+        or ("pregunta" in normalized and has_any("hacer", "suger"))
+    )
+    asks_overview = has_any(
+        "que puedo analizar",
+        "que puedo explorar",
+        "resumen general",
+        "vision general",
+    )
+    asks_columns = has_any("columna", "columnas", "variable", "variables", "campo", "campos")
+    asks_equivalent_columns = asks_columns and has_any("equivalent", "mapear", "mapeo", "parecen", "significado")
+    asks_data_quality = has_any(
+        "calidad",
+        "faltante",
+        "faltan",
+        "vacio",
+        "vacios",
+        "nulo",
+        "nulos",
+        "incompleto",
+        "sin dato",
+        "sin datos",
+    )
+    asks_source_comparison = has_any("fuente", "fuentes", "archivo", "archivos", "dataset", "datasets") and has_any(
+        "compar", "diferencia", "relacion", "relaciones", "cruzar"
+    )
+    asks_source_inventory = has_any("fuente", "fuentes", "archivo", "archivos", "excel", "dataset", "origen")
+    asks_critical_services = has_any("servicio", "servicios", "afectado") and has_any(
+        "critic", "priorizar", "primero", "ranking", "revisar", "peor"
+    )
+    asks_critical_priorities = has_any("prioridad", "prioridades", "severidad", "urgencia") and has_any(
+        "critic", "riesgo", "ranking", "concentran", "primero", "peor"
+    )
+    asks_cluster_compare = has_any("compar") and has_any("cluster", "clusters", "grupo", "grupos")
+    asks_cluster_sample = has_any("muestra", "muestras", "ejemplo", "ejemplos", "representativo")
+    asks_cluster_explain = has_any("explica", "explicar", "detalle", "significa", "entender") and has_any(
+        "cluster", "clusters", "grupo", "grupos"
+    )
+    asks_clusters = has_any("cluster", "clusters", "grupo", "grupos", "agrupamiento")
+    asks_next_steps = has_any(
+        "por donde empiezo",
+        "paso a paso",
+        "proximo paso",
+        "siguiente paso",
+        "guiame",
+        "guia",
+        "que debo revisar",
+        "donde revisar",
+    )
+    asks_recommendations = has_any(
+        "decision",
+        "decidir",
+        "alternativa",
+        "alternativas",
+        "recomend",
+        "accion",
+        "acciones",
+        "priorizar",
+        "que hago",
+    )
+
+    if asks_dynamic_questions:
+        collect("preguntas_dinamicas", _dynamic_questions_answer(df, run_context))
+
+    if asks_overview:
         collect("resumen_general", _overview(df))
 
-    if any(term in normalized for term in ["sla", "incumpl"]):
-        collect("analizar_sla", _sla_answer(df, normalized))
+    if asks_source_comparison:
+        collect("comparar_fuentes", _source_comparison_answer(df, run_context))
+    elif asks_source_inventory:
+        collect("analizar_fuentes", _source_review_answer(df, run_context))
 
-    if any(term in normalized for term in ["tiempo", "resolucion", "resolver", "demora"]):
-        collect("analizar_tiempos_resolucion", _resolution_answer(df, normalized))
+    if asks_missing_assignment:
+        collect("calidad_asignacion", _missing_assignment_answer(df, run_context))
+    elif asks_data_quality:
+        collect("calidad_datos", _data_quality_answer(df))
 
-    if any(term in normalized for term in ["servicio", "afectado", "volumen"]):
-        collect("analizar_servicios", _services_answer(df))
+    if asks_equivalent_columns:
+        collect("columnas_equivalentes", _equivalent_columns_answer(df))
+    elif asks_columns:
+        collect("columnas_detectadas", _columns_meaning_answer(df))
 
-    if any(term in normalized for term in ["prioridad", "severidad", "critic", "riesgo", "impacto"]):
-        collect("analizar_prioridades", _priority_answer(df))
+    if asks_dashboard:
+        collect("hallazgos_dashboard", _dashboard_findings_answer(df, run_context))
 
-    if any(term in normalized for term in ["causa", "raiz", "root"]):
-        collect("analizar_causas_raiz", _root_cause_answer(df))
-
-    if any(term in normalized for term in ["anomalia", "anomalo", "atipic", "outlier"]):
-        collect("analizar_anomalias", _anomalies_answer(df))
-
-    if any(term in normalized for term in ["cluster", "grupo similar"]):
+    if asks_cluster_compare:
+        collect("comparar_clusters", _cluster_comparison_answer(df, normalized))
+    elif asks_cluster_sample:
+        collect("muestras_clusters", _cluster_sample_answer(df, normalized))
+    elif asks_cluster_explain:
+        collect("explicar_cluster", _cluster_explanation_answer(df, normalized))
+    elif asks_clusters:
         collect("analizar_clusters", _clusters_answer(df))
 
-    if any(
-        term in normalized
-        for term in [
-            "decision",
-            "decidir",
-            "alternativa",
-            "alternativas",
-            "recomend",
-            "accion",
-            "acciones",
-            "priorizar",
-            "que hago",
-            "proximo paso",
-        ]
-    ):
+    if not asks_missing_assignment and has_any("sla", "incumpl"):
+        collect("analizar_sla", _sla_answer(df, normalized))
+
+    if not asks_missing_assignment and has_any("tiempo", "resolucion", "resolver", "demora"):
+        collect("analizar_tiempos_resolucion", _resolution_answer(df, normalized))
+
+    if not asks_missing_assignment and asks_critical_services:
+        collect("ranking_servicios_criticos", _critical_services_answer(df))
+    elif not asks_missing_assignment and has_any("servicio", "servicios", "afectado", "volumen"):
+        collect("analizar_servicios", _services_answer(df))
+
+    if not asks_missing_assignment and asks_critical_priorities:
+        collect("ranking_prioridades_criticas", _critical_priorities_answer(df))
+    elif not asks_missing_assignment and has_any("prioridad", "prioridades", "severidad", "urgencia", "riesgo", "impacto"):
+        collect("analizar_prioridades", _priority_answer(df))
+
+    if has_any("causa", "raiz", "root"):
+        collect("analizar_causas_raiz", _root_cause_answer(df))
+
+    if has_any("anomalia", "anomalo", "atipic", "outlier"):
+        collect("analizar_anomalias", _anomalies_answer(df))
+
+    if asks_recommendations and not asks_dashboard:
         collect("alternativas_decision", _decision_alternatives(df))
+
+    if asks_next_steps:
+        collect("guia_proximos_pasos", _next_steps_answer(df, run_context))
+
+    if not answer_parts and has_any("que puedo", "analizar", "explorar", "resumen"):
+        collect("resumen_general", _overview(df))
 
     if not answer_parts:
         collect("resumen_general", _overview(df))
@@ -844,6 +1948,7 @@ def build_chat_response(run_id: str, question: str) -> ChatResponse:
         question=question,
         tool_summaries=tool_summaries,
         fallback_answer=fallback_answer,
+        conversation_history=history,
     )
 
     return ChatResponse(
