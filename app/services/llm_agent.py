@@ -245,16 +245,25 @@ def explain_with_llm(
     question: str,
     tool_summaries: list[dict[str, Any]],
     fallback_answer: str,
+    conversation_history: list[dict[str, str]] | None = None,
 ) -> LlmResult:
     result = complete_with_llm(
         system_prompt=SYSTEM_PROMPT,
         user_payload={
             "pregunta_usuario": question,
+            "historial_reciente": conversation_history or [],
             "resumenes_agregados": tool_summaries,
             "respuesta_base": fallback_answer,
             "instruccion": (
                 "Reescribe la respuesta base en lenguaje simple. "
-                "Usa solo los resumenes agregados. Mantene una extension similar. "
+                "Usa solo los resumenes agregados y respeta la intencion de la pregunta. "
+                "No repitas una respuesta generica si hay una herramienta especifica. "
+                "Mantene una extension similar. "
+                "Si el usuario pregunta por una fuente o archivo, responde con el "
+                "nombre de fuente disponible y que revisar dentro de esa fuente. "
+                "Si pregunta por datos faltantes, explica conteos, columnas revisadas "
+                "y donde comprobarlos; no propongas alternativas generales. "
+                "Si pregunta por dashboard, lista hallazgos accionables y por que llevarlos. "
                 "Si hay hallazgos de alternativas_decision, incluye hasta tres "
                 "opciones priorizadas con: foco, por que importa y proximo paso."
             ),
