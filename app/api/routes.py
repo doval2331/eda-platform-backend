@@ -354,7 +354,10 @@ async def upload_project_source(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail="Error al guardar la fuente") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al guardar la fuente: {exc}",
+        ) from exc
     return ProjectDetail(**detail)
 
 

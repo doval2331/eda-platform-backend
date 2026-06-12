@@ -311,6 +311,17 @@ def add_text_source(
     return get_project_detail(db, project_id=project_id, user_id=user_id)
 
 
+def _resolve_source_type_for_kind(source_type: str, normalized_kind: str) -> str:
+    """Alinea el tipo semántico con el formato real del archivo."""
+    if normalized_kind == "tabular":
+        if source_type in CSV_SOURCE_TYPES | OTHER_SOURCE_TYPES:
+            return source_type
+        return "other"
+    if source_type in TEXT_SOURCE_TYPES | OTHER_SOURCE_TYPES:
+        return source_type
+    return "other"
+
+
 def add_project_source(
     db: Session,
     *,
@@ -323,34 +334,16 @@ def add_project_source(
 ) -> dict:
     if source_type not in ALL_SOURCE_TYPES:
         raise ValueError(f"Tipo de fuente no valido: {source_type}")
-    if source_type in CSV_SOURCE_TYPES:
-        return add_csv_source(
-            db,
-            project_id=project_id,
-            user_id=user_id,
-            source_type=source_type,
-            source_name=source_name,
-            filename=filename,
-            content=content,
-        )
-    if source_type in TEXT_SOURCE_TYPES:
-        return add_text_source(
-            db,
-            project_id=project_id,
-            user_id=user_id,
-            source_type=source_type,
-            source_name=source_name,
-            filename=filename,
-            content=content,
-        )
 
     normalized_kind = detect_source_kind(filename)
+    resolved_type = _resolve_source_type_for_kind(source_type, normalized_kind)
+
     if normalized_kind == "tabular":
         return add_csv_source(
             db,
             project_id=project_id,
             user_id=user_id,
-            source_type=source_type,
+            source_type=resolved_type,
             source_name=source_name,
             filename=filename,
             content=content,
@@ -359,7 +352,7 @@ def add_project_source(
         db,
         project_id=project_id,
         user_id=user_id,
-        source_type=source_type,
+        source_type=resolved_type,
         source_name=source_name,
         filename=filename,
         content=content,
