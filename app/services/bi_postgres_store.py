@@ -18,6 +18,10 @@ class BiSyncResult:
     tables: dict[str, int]
 
 
+DEFAULT_BI_INSERT_CHUNK_SIZE = 1_000
+MAX_POSTGRES_BIND_PARAMETERS = 60_000
+
+
 def _settings():
     return get_settings()
 
@@ -34,6 +38,12 @@ def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     return df.where(pd.notnull(df), None)
+
+
+def _bi_insert_chunksize(df: pd.DataFrame) -> int:
+    column_count = max(len(df.columns), 1)
+    safe_chunk = MAX_POSTGRES_BIND_PARAMETERS // column_count
+    return max(1, min(DEFAULT_BI_INSERT_CHUNK_SIZE, safe_chunk))
 
 
 def _read_duckdb(query: str, params: list[Any] | None = None) -> pd.DataFrame:
@@ -405,7 +415,14 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
         for table, df in frames.items():
             counts[table] = len(df)
             if not df.empty:
-                df.to_sql(table, con, if_exists="append", index=False, method="multi")
+                df.to_sql(
+                    table,
+                    con,
+                    if_exists="append",
+                    index=False,
+                    method="multi",
+                    chunksize=_bi_insert_chunksize(df),
+                )
 
     return BiSyncResult(
         status="ok",
