@@ -10,6 +10,8 @@ from app.api.deps import get_current_user
 from app.config import get_settings
 from app.db import AnalysisRun, User, get_db, run_to_detail, save_run
 from app.schemas import (
+    AgentHumanDecisionRequest,
+    AgentHumanDecisionResponse,
     AgentInterpretationRequest,
     AgentResultsResponse,
     AgentServiceResponse,
@@ -17,6 +19,7 @@ from app.schemas import (
     AgentTraceResponse,
     ChatRequest,
     ChatResponse,
+    ChatSuggestionsResponse,
     ConversationDashboardResponse,
     DatasetProfileResponse,
     HealthResponse,
@@ -39,7 +42,7 @@ from app.schemas import (
     RunSummary,
 )
 from app.services.dataset_store import get_dataset_meta, save_upload
-from app.services.conversation import build_chat_response
+from app.services.conversation import build_chat_response, build_suggested_questions_for_run
 from app.services.duckdb_store import (
     append_agent_decisions,
     list_agent_cluster_insights,
@@ -531,6 +534,17 @@ def chat_with_run(
     return build_chat_response(run_id, body.question)
 
 
+@router.get("/api/runs/{run_id}/chat/suggestions", response_model=ChatSuggestionsResponse)
+def get_chat_suggestions_for_run(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    return ChatSuggestionsResponse(suggested_questions=build_suggested_questions_for_run(run_id))
+
+
 @router.post("/api/runs/{run_id}/agents/strategy", response_model=AgentServiceResponse)
 def run_strategy_agent_for_run(
     run_id: str,
@@ -603,6 +617,48 @@ def run_interpretation_agent_for_run(
         llm_mode=meta.llm_mode,
         llm_detail=meta.llm_detail,
         model_name=meta.model_name,
+    )
+
+
+@router.post("/api/runs/{run_id}/agents/human-decision", response_model=AgentHumanDecisionResponse)
+def record_human_agent_decision_for_run(
+    run_id: str,
+    body: AgentHumanDecisionRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    _get_run_or_404(db, run_id)
+    selected_by_strategy = body.parameters.get("selected_variables_by_strategy")
+    variables_used: list[str] = []
+    if isinstance(selected_by_strategy, dict):
+        for selected_variables in selected_by_strategy.values():
+            if isinstance(selected_variables, list):
+                variables_used.extend(str(variable) for variable in selected_variables)
+            elif isinstance(selected_variables, str):
+                variables_used.append(selected_variables)
+    variables_used = sorted({variable for variable in variables_used if variable.strip()})
+
+    tracer = TraceCollector(run_id=run_id)
+    trace_id = tracer.record(
+        agent_name="human_in_the_loop",
+        decision_type=body.decision_type,
+        prompt="Validacion humana de la estrategia sugerida por agentes.",
+        response=body.summary,
+        model_name=body.model_name,
+        variables_used=variables_used,
+        input_artifacts=["agent_recommendations", f"run:{run_id}"],
+        parameters={
+            "status": body.status,
+            "approved_strategy_ids": body.approved_strategy_ids,
+            **body.parameters,
+        },
+    )
+    append_agent_decisions(tracer.to_frame())
+    return AgentHumanDecisionResponse(
+        status="ok",
+        run_id=run_id,
+        trace_id=trace_id,
+        message="Decision humana registrada en trazabilidad.",
     )
 
 
