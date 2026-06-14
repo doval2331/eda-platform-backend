@@ -23,6 +23,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "min_samples": None,
         "cluster_selection_method": "eom",
     },
+    "dbscan": {
+        "eps": 0.027,
+        "min_samples": 5,
+    },
     "tsne_max_samples": 3000,
 }
 
@@ -43,7 +47,7 @@ def load_pipeline_config(path: Path | str | None = None) -> dict[str, Any]:
         loaded = json.load(f)
     merged = dict(DEFAULT_CONFIG)
     merged.update({k: v for k, v in loaded.items() if k in DEFAULT_CONFIG})
-    for key in ("umap", "hdbscan"):
+    for key in ("umap", "hdbscan", "dbscan"):
         if key in loaded and isinstance(loaded[key], dict):
             merged[key] = {**DEFAULT_CONFIG[key], **loaded[key]}
     return merged

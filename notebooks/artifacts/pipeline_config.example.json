@@ -11,6 +11,10 @@
     "min_samples": 8,
     "cluster_selection_method": "eom"
   },
+  "dbscan": {
+    "eps": 0.35,
+    "min_samples": 5
+  },
   "tsne_max_samples": 3000,
   "metrics_full_10k": {
     "silhouette": null,
