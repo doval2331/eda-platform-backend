@@ -83,6 +83,8 @@ class PipelineResult(BaseModel):
     outliers_count: int
     metrics: PipelineMetrics
     metadata: list[EvidenceMetadata]
+    baseline_algorithm: str = "DBSCAN"
+    baseline_metrics: PipelineMetrics | None = None
 
 
 class DatasetProfileResponse(BaseModel):
