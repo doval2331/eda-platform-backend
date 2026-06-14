@@ -11,38 +11,64 @@
     "min_samples": 5,
     "cluster_selection_method": "eom"
   },
+  "dbscan": {
+    "eps": 0.027,
+    "min_samples": 5
+  },
   "tsne_max_samples": 3000,
   "metrics_full_10k": {
-    "silhouette": 0.712851881980896,
-    "davies_bouldin": 0.3759881865632519,
-    "outliers_count": 696,
-    "outliers_pct": 6.96,
-    "n_clusters": 261
+    "silhouette": 0.8450555801391602,
+    "davies_bouldin": 0.19496135332558015,
+    "outliers_count": 74,
+    "outliers_pct": 0.74,
+    "n_clusters": 306
   },
   "metrics_by_reduction": [
     {
       "reduction": "PCA",
-      "silhouette": 0.6278770039131891,
-      "davies_bouldin": 0.4605212639160264,
-      "outliers": 216,
-      "outliers_pct": 2.16,
-      "n_clusters": 3
+      "silhouette": 0.7016560842667804,
+      "davies_bouldin": 0.39025326743639643,
+      "outliers": 195,
+      "outliers_pct": 1.95,
+      "n_clusters": 2
     },
     {
       "reduction": "UMAP",
-      "silhouette": 0.712851881980896,
-      "davies_bouldin": 0.3759881865632519,
-      "outliers": 696,
-      "outliers_pct": 6.96,
-      "n_clusters": 261
+      "silhouette": 0.8450555801391602,
+      "davies_bouldin": 0.19496135332558015,
+      "outliers": 74,
+      "outliers_pct": 0.74,
+      "n_clusters": 306
     },
     {
       "reduction": "t-SNE",
-      "silhouette": 0.35131096839904785,
-      "davies_bouldin": 0.5410497563514542,
-      "outliers": 11,
-      "outliers_pct": 0.44,
-      "n_clusters": 2
+      "silhouette": 0.5856994986534119,
+      "davies_bouldin": 0.5846327708819808,
+      "outliers": 203,
+      "outliers_pct": 8.12,
+      "n_clusters": 98
+    }
+  ],
+  "metrics_by_clustering": [
+    {
+      "algorithm": "HDBSCAN",
+      "n_clusters": 306,
+      "noise_pct": 0.74,
+      "silhouette": 0.8450555801391602,
+      "davies_bouldin": 0.19496135332558015,
+      "calinski_harabasz": 132.0675572358193,
+      "ari": 0.02011030318579575,
+      "nmi": 0.2300101042966255
+    },
+    {
+      "algorithm": "DBSCAN",
+      "n_clusters": 393,
+      "noise_pct": 10.14,
+      "silhouette": 0.8499687910079956,
+      "davies_bouldin": 0.21496524752815344,
+      "calinski_harabasz": 136.68769458754787,
+      "ari": 0.006828090052973546,
+      "nmi": 0.22802660547162842
     }
   ],
   "source": "notebooks/01_it_ops_eda.ipynb"

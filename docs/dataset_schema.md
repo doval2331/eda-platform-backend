@@ -56,9 +56,11 @@ Hasta recibir el CSV definitivo del profesor, el pipeline usa el dataset a nivel
 3. Exclusión automática de identificadores, texto y `synthetic_segment`/`segment`.
 4. Imputación: mediana (numéricas), moda (categóricas).
 5. One-hot encoding + StandardScaler.
-6. Reducción 2D (PCA / t-SNE / UMAP) → HDBSCAN.
+6. Reducción 2D (PCA / t-SNE / UMAP) → HDBSCAN (principal) + DBSCAN (baseline comparativo automático).
 
 ## Métricas devueltas por `POST /api/runs`
+
+### HDBSCAN (`metrics`)
 
 | Métrica | Descripción |
 |---------|-------------|
@@ -70,6 +72,10 @@ Hasta recibir el CSV definitivo del profesor, el pipeline usa el dataset a nivel
 | `ari` | ARI vs `synthetic_segment` (si existe) |
 | `nmi` | NMI vs segmento sintético (si existe) |
 | `cluster_stability` | Acuerdo entre dos HDBSCAN con parámetros cercanos |
+
+### DBSCAN baseline (`baseline_metrics`)
+
+Mismas métricas excepto `cluster_stability`. Se calculan sobre la misma proyección 2D solo para comparación metodológica; no alimentan scatter, metadatos ni agente.
 
 ## Endpoints y consumo
 

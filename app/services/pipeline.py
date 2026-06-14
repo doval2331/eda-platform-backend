@@ -25,6 +25,7 @@ from app.services.tabular_preprocess import (
 )
 from app.services.pipeline_config import load_pipeline_config
 from app.services.pipeline_core import (
+    cluster_dbscan,
     cluster_hdbscan,
     compute_metrics,
     reduce_2d,
@@ -76,6 +77,7 @@ def _pipeline_metrics(
     cfg: dict,
     df: pd.DataFrame | None,
     n_samples: int,
+    include_stability: bool = True,
 ) -> PipelineMetrics:
     reference = None
     if df is not None:
@@ -87,8 +89,51 @@ def _pipeline_metrics(
         cluster_labels,
         X_features=X_scaled,
         reference_labels=reference,
-        hdbscan_config=cfg,
+        hdbscan_config=cfg if include_stability else None,
         n_samples=n_samples,
+        include_stability=include_stability,
+    )
+
+
+def _build_pipeline_result(
+    *,
+    X_scaled: np.ndarray,
+    X_2d: np.ndarray,
+    cfg: dict,
+    df: pd.DataFrame | None,
+    n_samples: int,
+    metadata: list[EvidenceMetadata],
+    labels_hdb: np.ndarray | None = None,
+) -> PipelineResult:
+    if labels_hdb is None:
+        labels_hdb = cluster_hdbscan(X_2d, config=cfg)
+    metrics_hdb = _pipeline_metrics(
+        X_scaled=X_scaled,
+        X_2d=X_2d,
+        cluster_labels=labels_hdb,
+        cfg=cfg,
+        df=df,
+        n_samples=n_samples,
+        include_stability=True,
+    )
+    labels_db = cluster_dbscan(X_2d, config=cfg)
+    metrics_db = _pipeline_metrics(
+        X_scaled=X_scaled,
+        X_2d=X_2d,
+        cluster_labels=labels_db,
+        cfg=cfg,
+        df=df,
+        n_samples=n_samples,
+        include_stability=False,
+    )
+    return PipelineResult(
+        X_2d=X_2d.tolist(),
+        cluster_labels=labels_hdb.astype(int).tolist(),
+        outliers_count=int(np.sum(labels_hdb == -1)),
+        metrics=metrics_hdb,
+        baseline_algorithm="DBSCAN",
+        baseline_metrics=metrics_db,
+        metadata=metadata,
     )
 
 
@@ -337,29 +382,22 @@ def run_pipeline(
         cfg = load_pipeline_config()
         X_scaled = scale_features(X)
         X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
-        cluster_labels = cluster_hdbscan(X_2d, config=cfg)
-        outliers_count = int(np.sum(cluster_labels == -1))
-        metrics = _pipeline_metrics(
-            X_scaled=X_scaled,
-            X_2d=X_2d,
-            cluster_labels=cluster_labels,
-            cfg=cfg,
-            df=df,
-            n_samples=len(df),
-        )
+        labels_hdb = cluster_hdbscan(X_2d, config=cfg)
         id_col = id_column or profile.suggested_id_column
         metadata = _build_tabular_metadata(
             df,
-            cluster_labels,
+            labels_hdb,
             id_col,
             feature_columns=[*num_cols, *cat_cols],
         )
-        return PipelineResult(
-            X_2d=X_2d.tolist(),
-            cluster_labels=cluster_labels.astype(int).tolist(),
-            outliers_count=outliers_count,
-            metrics=metrics,
+        return _build_pipeline_result(
+            X_scaled=X_scaled,
+            X_2d=X_2d,
+            cfg=cfg,
+            df=df,
+            n_samples=len(df),
             metadata=metadata,
+            labels_hdb=labels_hdb,
         )
 
     if modality == "it_ops":
@@ -372,23 +410,16 @@ def run_pipeline(
         cfg = load_pipeline_config()
         X_scaled = scale_features(X)
         X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
-        cluster_labels = cluster_hdbscan(X_2d, config=cfg)
-        outliers_count = int(np.sum(cluster_labels == -1))
-        metrics = _pipeline_metrics(
+        labels_hdb = cluster_hdbscan(X_2d, config=cfg)
+        metadata = _build_it_ops_metadata(df, labels_hdb)
+        return _build_pipeline_result(
             X_scaled=X_scaled,
             X_2d=X_2d,
-            cluster_labels=cluster_labels,
             cfg=cfg,
             df=df,
             n_samples=len(df),
-        )
-        metadata = _build_it_ops_metadata(df, cluster_labels)
-        return PipelineResult(
-            X_2d=X_2d.tolist(),
-            cluster_labels=cluster_labels.astype(int).tolist(),
-            outliers_count=outliers_count,
-            metrics=metrics,
             metadata=metadata,
+            labels_hdb=labels_hdb,
         )
 
     effective_seed = seed_for_modality(modality, seed)
@@ -402,24 +433,16 @@ def run_pipeline(
     cfg = load_pipeline_config()
     X_scaled = scale_features(X)
     X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
-    cluster_labels = cluster_hdbscan(X_2d, config=cfg)
-    outliers_count = int(np.sum(cluster_labels == -1))
-    metrics = _pipeline_metrics(
+    labels_hdb = cluster_hdbscan(X_2d, config=cfg)
+    metadata = _build_legacy_metadata(
+        true_labels, labels_hdb, modality, effective_seed
+    )
+    return _build_pipeline_result(
         X_scaled=X_scaled,
         X_2d=X_2d,
-        cluster_labels=cluster_labels,
         cfg=cfg,
         df=None,
         n_samples=legacy_n_samples,
-    )
-    metadata = _build_legacy_metadata(
-        true_labels, cluster_labels, modality, effective_seed
-    )
-
-    return PipelineResult(
-        X_2d=X_2d.tolist(),
-        cluster_labels=cluster_labels.astype(int).tolist(),
-        outliers_count=outliers_count,
-        metrics=metrics,
         metadata=metadata,
+        labels_hdb=labels_hdb,
     )

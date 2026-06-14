@@ -168,6 +168,8 @@ Metricas devueltas por cada ejecucion (`metrics` en la respuesta):
 | `nmi` | Normalized Mutual Information vs segmento sintetico |
 | `cluster_stability` | Acuerdo ARI entre dos HDBSCAN con parametros ligeramente distintos |
 
+Adicionalmente, cada ejecucion calcula **DBSCAN como baseline comparativo** sobre la misma proyeccion 2D. Las metricas del baseline se devuelven en `baseline_metrics` (sin cambiar `cluster_labels`, scatter, chat ni insights, que siguen usando HDBSCAN). Parametros en `pipeline_config.json` → bloque `dbscan` (`eps`, `min_samples`).
+
 Las metricas se persisten en SQLite (`result_json`), DuckDB (`run_registry`) y, si BI esta activo, PostgreSQL (`bi_runs`).
 
 ## Ejecutar API
@@ -523,7 +525,7 @@ Datos DBeaver:
 ```text
 app/api/routes.py                  # Endpoints FastAPI
 app/services/pipeline.py           # Orquestacion del pipeline
-app/services/pipeline_core.py      # Reduccion dimensional + HDBSCAN
+app/services/pipeline_core.py      # Reduccion dimensional + HDBSCAN + DBSCAN baseline
 app/services/duckdb_store.py       # Persistencia analitica DuckDB
 app/services/conversation.py       # Motor conversacional guiado
 app/services/dataset_store.py      # Carga/perfilado de CSV
