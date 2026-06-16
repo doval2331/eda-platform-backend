@@ -2,7 +2,7 @@ import json
 from typing import Annotated
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -730,12 +730,45 @@ def get_agent_traces_for_run(
     run_id: str,
     db: Annotated[Session, Depends(get_db)],
     _user: Annotated[User, Depends(get_current_user)],
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
 ):
     _get_run_or_404(db, run_id)
-    traces = list_agent_decisions(run_id)
+    traces = list_agent_decisions(run_id, limit=limit)
     if not traces:
         raise HTTPException(status_code=404, detail="No hay trazabilidad de agentes para esta corrida")
     return AgentTraceResponse(run_id=run_id, trace_count=len(traces), traces=traces)
+
+
+@router.get("/api/projects/{project_id}/agents/traces", response_model=AgentTraceResponse)
+def get_agent_traces_for_project(
+    project_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    limit: Annotated[int | None, Query(ge=1, le=500)] = None,
+):
+    get_project_or_404(db, project_id=project_id, user_id=user.id)
+    run_ids = [
+        row.id
+        for row in (
+            db.query(AnalysisRun.id)
+            .filter(AnalysisRun.project_id == project_id)
+            .order_by(AnalysisRun.created_at.asc())
+            .all()
+        )
+    ]
+    traces: list[dict] = []
+    for run_id in run_ids:
+        for trace in list_agent_decisions(run_id, limit=limit):
+            traces.append({**trace, "source_run_id": run_id})
+    if not traces:
+        raise HTTPException(status_code=404, detail="No hay trazabilidad de agentes para este proyecto")
+    if limit is not None:
+        traces = sorted(
+            traces,
+            key=lambda trace: str(trace.get("created_at") or ""),
+            reverse=True,
+        )[:limit]
+    return AgentTraceResponse(run_id=project_id, trace_count=len(traces), traces=traces)
 
 
 @router.post("/api/runs/{run_id}/insights/select")
