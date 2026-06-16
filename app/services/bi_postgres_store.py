@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.config import get_settings
 from app.services.duckdb_store import _connect, init_duckdb
@@ -50,6 +50,21 @@ def _read_duckdb(query: str, params: list[Any] | None = None) -> pd.DataFrame:
     init_duckdb()
     with _connect() as con:
         return _clean_df(con.execute(query, params or []).df())
+
+
+def _existing_columns(con: Connection, table_name: str) -> set[str]:
+    rows = con.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    )
+    return {str(row[0]) for row in rows}
 
 
 def init_bi_schema(engine: Engine | None = None) -> None:
@@ -193,12 +208,14 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             "causa_raiz_simulada": "TEXT",
             "synthetic_segment": "TEXT",
         }
+        evidence_columns = _existing_columns(con, "bi_evidences")
         for column, dtype in incident_columns.items():
-            con.execute(
-                text(
-                    f"ALTER TABLE bi_evidences ADD COLUMN IF NOT EXISTS {column} {dtype}"
+            if column not in evidence_columns:
+                con.execute(
+                    text(
+                        f"ALTER TABLE bi_evidences ADD COLUMN {column} {dtype}"
+                    )
                 )
-            )
         con.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS idx_bi_evidences_run "
@@ -217,6 +234,7 @@ def init_bi_schema(engine: Engine | None = None) -> None:
                 "ON bi_selected_insights(run_id)"
             )
         )
+        run_columns = _existing_columns(con, "bi_runs")
         for column, sql_type in (
             ("calinski_harabasz", "DOUBLE PRECISION"),
             ("ari", "DOUBLE PRECISION"),
@@ -224,11 +242,12 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             ("cluster_stability", "DOUBLE PRECISION"),
             ("noise_pct", "DOUBLE PRECISION"),
         ):
-            con.execute(
-                text(
-                    f"ALTER TABLE bi_runs ADD COLUMN IF NOT EXISTS {column} {sql_type}"
+            if column not in run_columns:
+                con.execute(
+                    text(
+                        f"ALTER TABLE bi_runs ADD COLUMN {column} {sql_type}"
+                    )
                 )
-            )
 
 
 def _run_filter(column: str, run_id: str | None) -> tuple[str, list[Any]]:
@@ -453,6 +472,10 @@ def _bi_table_counts(con) -> dict[str, int]:
     )
     counts: dict[str, int] = {}
     for table in tables:
+        exists = con.execute(text("SELECT to_regclass(:table)"), {"table": table}).scalar()
+        if not exists:
+            counts[table] = 0
+            continue
         counts[table] = int(con.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0)
     return counts
 
@@ -473,8 +496,8 @@ def get_bi_status() -> dict[str, Any]:
 
     try:
         engine = _engine()
-        init_bi_schema(engine)
-        with engine.connect() as con:
+        with engine.begin() as con:
+            con.execute(text("SET LOCAL lock_timeout = '750ms'"))
             con.execute(text("SELECT 1"))
             status["tables"] = _bi_table_counts(con)
         status["postgres_status"] = "ok"
