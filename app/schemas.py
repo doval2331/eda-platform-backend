@@ -294,6 +294,7 @@ class MetabaseStatusResponse(BaseModel):
     dashboard_url: str | None = None
     postgres_status: str
     detail: str | None = None
+    tables: dict[str, int] = Field(default_factory=dict)
 
 
 class MetabaseDashboardCard(BaseModel):

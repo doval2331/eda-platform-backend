@@ -442,6 +442,21 @@ def try_sync_bi_tables(run_id: str | None = None) -> BiSyncResult:
         )
 
 
+def _bi_table_counts(con) -> dict[str, int]:
+    tables = (
+        "bi_runs",
+        "bi_evidences",
+        "bi_cluster_summary",
+        "bi_sla_by_category",
+        "bi_service_risk",
+        "bi_selected_insights",
+    )
+    counts: dict[str, int] = {}
+    for table in tables:
+        counts[table] = int(con.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar() or 0)
+    return counts
+
+
 def get_bi_status() -> dict[str, Any]:
     settings = _settings()
     status: dict[str, Any] = {
@@ -450,6 +465,7 @@ def get_bi_status() -> dict[str, Any]:
         "dashboard_url": settings.metabase_dashboard_url or None,
         "postgres_status": "disabled" if not settings.bi_sync_enabled else "unknown",
         "detail": None,
+        "tables": {},
     }
     if not settings.bi_sync_enabled:
         status["detail"] = "BI_SYNC_ENABLED=false"
@@ -460,6 +476,7 @@ def get_bi_status() -> dict[str, Any]:
         init_bi_schema(engine)
         with engine.connect() as con:
             con.execute(text("SELECT 1"))
+            status["tables"] = _bi_table_counts(con)
         status["postgres_status"] = "ok"
         status["detail"] = "PostgreSQL BI disponible"
     except Exception as exc:  # pragma: no cover - depende de servicio externo.
