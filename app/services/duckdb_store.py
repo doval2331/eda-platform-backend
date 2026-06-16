@@ -745,17 +745,23 @@ def append_agent_decisions(decisions: pd.DataFrame) -> None:
     )
 
 
-def list_agent_decisions(run_id: str) -> list[dict[str, Any]]:
+def list_agent_decisions(run_id: str, limit: int | None = None) -> list[dict[str, Any]]:
     init_duckdb()
+    params: list[Any] = [run_id]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT ?"
+        params.append(limit)
     with _connect() as con:
         df = con.execute(
-            """
+            f"""
             SELECT *
             FROM agent_decisions
             WHERE run_id = ?
-            ORDER BY created_at
+            ORDER BY created_at DESC
+            {limit_clause}
             """,
-            [run_id],
+            params,
         ).df()
     if df.empty:
         return []
