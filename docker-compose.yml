@@ -26,6 +26,7 @@ services:
   metabase:
     image: metabase/metabase:latest
     container_name: eda-platform-metabase
+    hostname: metabase
     restart: unless-stopped
     depends_on:
       postgres:

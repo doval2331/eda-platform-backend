@@ -805,8 +805,20 @@ def metabase_status(_user: Annotated[User, Depends(get_current_user)]):
 
 @router.post("/api/metabase/dashboard", response_model=MetabaseDashboardCreateResponse)
 def create_metabase_dashboard(_user: Annotated[User, Depends(get_current_user)]):
+    settings = get_settings()
+    if not settings.metabase_username or not settings.metabase_password:
+        return MetabaseDashboardCreateResponse(
+            status="error",
+            message=(
+                "Configura METABASE_USERNAME y METABASE_PASSWORD en el backend "
+                "antes de crear el dashboard en Metabase."
+            ),
+        )
+
     try:
-        sync_bi_tables(force=True)
+        status = get_bi_status()
+        if not status.get("tables", {}).get("bi_evidences"):
+            sync_bi_tables(force=True)
         result = create_conversation_dashboard()
     except MetabaseDashboardError as exc:
         return MetabaseDashboardCreateResponse(status="error", message=str(exc))
