@@ -77,15 +77,18 @@ def reduce_2d(
 def cluster_hdbscan(X_2d: np.ndarray, *, config: dict | None = None) -> np.ndarray:
     cfg = config or load_pipeline_config()
     hdb = cfg.get("hdbscan", {})
-    auto_mcs = max(5, min(15, X_2d.shape[0] // 12))
+
+    n = X_2d.shape[0]
     min_cluster_size = hdb.get("min_cluster_size")
     min_samples = hdb.get("min_samples")
+
     if min_cluster_size is None:
-        min_cluster_size = auto_mcs
+        min_cluster_size = _mcs_adaptativo(n)
     else:
         min_cluster_size = int(min_cluster_size)
+
     if min_samples is None:
-        min_samples = max(3, min_cluster_size // 3)
+        min_samples = max(5, min_cluster_size // 8)
     else:
         min_samples = int(min_samples)
 
@@ -95,7 +98,6 @@ def cluster_hdbscan(X_2d: np.ndarray, *, config: dict | None = None) -> np.ndarr
         cluster_selection_method=hdb.get("cluster_selection_method", "eom"),
     )
     return clusterer.fit_predict(X_2d)
-
 
 def _resolve_hdbscan_min_samples(cfg: dict, n_points: int) -> int:
     hdb = cfg.get("hdbscan", {})

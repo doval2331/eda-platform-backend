@@ -380,8 +380,9 @@ def run_pipeline(
         )
         X, _ = dataframe_to_features_generic(df, num_cols, cat_cols)
         cfg = load_pipeline_config()
-        X_scaled = scale_features(X)
-        X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
+        # Mejora 1: eliminado double scaling
+        # dataframe_to_features_generic ya aplica StandardScaler internamente
+        X_2d = reduce_2d(X, reduction_method, effective_seed, config=cfg)
         labels_hdb = cluster_hdbscan(X_2d, config=cfg)
         id_col = id_column or profile.suggested_id_column
         metadata = _build_tabular_metadata(
@@ -391,7 +392,7 @@ def run_pipeline(
             feature_columns=[*num_cols, *cat_cols],
         )
         return _build_pipeline_result(
-            X_scaled=X_scaled,
+            X_scaled=X,
             X_2d=X_2d,
             cfg=cfg,
             df=df,
@@ -399,6 +400,7 @@ def run_pipeline(
             metadata=metadata,
             labels_hdb=labels_hdb,
         )
+        
 
     if modality == "it_ops":
         df = load_it_ops_dataframe(
