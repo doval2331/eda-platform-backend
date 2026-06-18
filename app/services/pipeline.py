@@ -73,11 +73,13 @@ def _pipeline_metrics(
     *,
     X_scaled: np.ndarray,
     X_2d: np.ndarray,
+    X_hi: np.ndarray | None = None,
     cluster_labels: np.ndarray,
     cfg: dict,
     df: pd.DataFrame | None,
     n_samples: int,
     include_stability: bool = True,
+    pca_variance: float | None = None,
 ) -> PipelineMetrics:
     reference = None
     if df is not None:
@@ -87,34 +89,39 @@ def _pipeline_metrics(
     return compute_metrics(
         X_2d,
         cluster_labels,
+        X_hi=X_hi,
         X_features=X_scaled,
         reference_labels=reference,
         hdbscan_config=cfg if include_stability else None,
         n_samples=n_samples,
         include_stability=include_stability,
+        pca_variance=pca_variance,
     )
-
 
 def _build_pipeline_result(
     *,
     X_scaled: np.ndarray,
     X_2d: np.ndarray,
+    X_hi: np.ndarray | None = None,
     cfg: dict,
     df: pd.DataFrame | None,
     n_samples: int,
     metadata: list[EvidenceMetadata],
     labels_hdb: np.ndarray | None = None,
+    pca_variance: float | None = None,
 ) -> PipelineResult:
     if labels_hdb is None:
         labels_hdb = cluster_hdbscan(X_2d, config=cfg)
     metrics_hdb = _pipeline_metrics(
         X_scaled=X_scaled,
         X_2d=X_2d,
+        X_hi=X_hi,
         cluster_labels=labels_hdb,
         cfg=cfg,
         df=df,
         n_samples=n_samples,
         include_stability=True,
+        pca_variance=pca_variance,
     )
     labels_db = cluster_dbscan(X_2d, config=cfg)
     metrics_db = _pipeline_metrics(
@@ -382,7 +389,7 @@ def run_pipeline(
         cfg = load_pipeline_config()
         # Mejora 1: eliminado double scaling
         # dataframe_to_features_generic ya aplica StandardScaler internamente
-        X_2d = reduce_2d(X, reduction_method, effective_seed, config=cfg)
+        X_2d, pca_variance = reduce_2d(X, reduction_method, effective_seed, config=cfg)
         labels_hdb = cluster_hdbscan(X_2d, config=cfg)
         id_col = id_column or profile.suggested_id_column
         metadata = _build_tabular_metadata(
@@ -394,11 +401,13 @@ def run_pipeline(
         return _build_pipeline_result(
             X_scaled=X,
             X_2d=X_2d,
+            X_hi=X,
             cfg=cfg,
             df=df,
             n_samples=len(df),
             metadata=metadata,
             labels_hdb=labels_hdb,
+            pca_variance=pca_variance,
         )
         
 
@@ -411,18 +420,7 @@ def run_pipeline(
         X, _, _meta, _groups = dataframe_to_features(df)
         cfg = load_pipeline_config()
         X_scaled = scale_features(X)
-        X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
-        labels_hdb = cluster_hdbscan(X_2d, config=cfg)
-        metadata = _build_it_ops_metadata(df, labels_hdb)
-        return _build_pipeline_result(
-            X_scaled=X_scaled,
-            X_2d=X_2d,
-            cfg=cfg,
-            df=df,
-            n_samples=len(df),
-            metadata=metadata,
-            labels_hdb=labels_hdb,
-        )
+        
 
     effective_seed = seed_for_modality(modality, seed)
     legacy_n_samples = n_samples if n_samples is not None else 2000
@@ -434,17 +432,19 @@ def run_pipeline(
     )
     cfg = load_pipeline_config()
     X_scaled = scale_features(X)
-    X_2d = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
+    X_2d, pca_variance = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
     labels_hdb = cluster_hdbscan(X_2d, config=cfg)
     metadata = _build_legacy_metadata(
-        true_labels, labels_hdb, modality, effective_seed
-    )
+            true_labels, labels_hdb, modality, effective_seed
+        )
     return _build_pipeline_result(
         X_scaled=X_scaled,
         X_2d=X_2d,
+        X_hi=X_scaled,
         cfg=cfg,
         df=None,
         n_samples=legacy_n_samples,
         metadata=metadata,
         labels_hdb=labels_hdb,
+        pca_variance=pca_variance,
     )
