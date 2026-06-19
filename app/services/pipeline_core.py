@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import warnings
+from sklearn.neighbors import NearestNeighbors
 from typing import Literal
 
 import hdbscan
@@ -37,11 +38,19 @@ def reduce_2d(
     seed: int,
     *,
     config: dict | None = None,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float | None]:
+    """
+    Devuelve (coordenadas_2d, varianza_explicada_acumulada).
+    varianza_explicada_acumulada solo aplica a PCA, None para t-SNE y UMAP.
+    """
     cfg = config or load_pipeline_config()
     n = X.shape[0]
+
     if method == "PCA":
-        return PCA(n_components=2, random_state=seed).fit_transform(X)
+        pca = PCA(n_components=2, random_state=seed)
+        coords = pca.fit_transform(X)
+        variance = float(sum(pca.explained_variance_ratio_) * 100)
+        return coords, variance
 
     if method == "t-SNE":
         max_n = int(cfg.get("tsne_max_samples", 3000))
@@ -60,7 +69,7 @@ def reduce_2d(
                 init="pca",
                 learning_rate="auto",
             )
-        return reducer.fit_transform(X)
+        return reducer.fit_transform(X), None
 
     umap_cfg = cfg.get("umap", {})
     n_neighbors = int(umap_cfg.get("n_neighbors", 15))
@@ -71,21 +80,24 @@ def reduce_2d(
         n_neighbors=min(n_neighbors, max(2, n - 1)),
         min_dist=min_dist,
     )
-    return reducer.fit_transform(X)
+    return reducer.fit_transform(X), None
 
 
 def cluster_hdbscan(X_2d: np.ndarray, *, config: dict | None = None) -> np.ndarray:
     cfg = config or load_pipeline_config()
     hdb = cfg.get("hdbscan", {})
-    auto_mcs = max(5, min(15, X_2d.shape[0] // 12))
+
+    n = X_2d.shape[0]
     min_cluster_size = hdb.get("min_cluster_size")
     min_samples = hdb.get("min_samples")
+
     if min_cluster_size is None:
-        min_cluster_size = auto_mcs
+        min_cluster_size = _mcs_adaptativo(n)
     else:
         min_cluster_size = int(min_cluster_size)
+
     if min_samples is None:
-        min_samples = max(3, min_cluster_size // 3)
+        min_samples = max(5, min_cluster_size // 8)
     else:
         min_samples = int(min_samples)
 
@@ -95,7 +107,6 @@ def cluster_hdbscan(X_2d: np.ndarray, *, config: dict | None = None) -> np.ndarr
         cluster_selection_method=hdb.get("cluster_selection_method", "eom"),
     )
     return clusterer.fit_predict(X_2d)
-
 
 def _resolve_hdbscan_min_samples(cfg: dict, n_points: int) -> int:
     hdb = cfg.get("hdbscan", {})
@@ -153,16 +164,57 @@ def _cluster_stability(
     except ValueError:
         return None
 
+def _trustworthiness(
+    X_hi: np.ndarray,
+    X_lo: np.ndarray,
+    k: int = 10,
+    sample_size: int = 500,
+) -> float | None:
+    
+    try:
+        n = X_hi.shape[0]
+        if n < k + 2:
+            return None
+        # Muestra aleatoria para eficiencia
+        if n > sample_size:
+            rng = np.random.default_rng(42)
+            idx = rng.choice(n, sample_size, replace=False)
+            X_hi = X_hi[idx]
+            X_lo = X_lo[idx]
+            n = sample_size
 
+        nbrs_hi = NearestNeighbors(n_neighbors=k + 1).fit(X_hi)
+        _, idx_hi = nbrs_hi.kneighbors(X_hi)
+        idx_hi = idx_hi[:, 1:]
+
+        nbrs_lo = NearestNeighbors(n_neighbors=k + 1).fit(X_lo)
+        _, idx_lo = nbrs_lo.kneighbors(X_lo)
+        idx_lo = idx_lo[:, 1:]
+
+        T = 0.0
+        for i in range(n):
+            hi_set = set(idx_hi[i])
+            for j in idx_lo[i]:
+                if j not in hi_set:
+                    r = np.where(idx_hi[i] == j)[0]
+                    rank = int(r[0]) + 1 if len(r) > 0 else n
+                    T += rank - k
+        factor = 2.0 / (n * k * (2 * n - 3 * k - 1))
+        return float(max(0.0, 1.0 - factor * T))
+    except Exception:
+        return None
+    
 def compute_metrics(
     X_2d: np.ndarray,
     labels: np.ndarray,
     *,
+    X_hi: np.ndarray | None = None,
     X_features: np.ndarray | None = None,
     reference_labels: np.ndarray | None = None,
     hdbscan_config: dict | None = None,
     n_samples: int | None = None,
     include_stability: bool = True,
+    pca_variance: float | None = None,
 ) -> PipelineMetrics:
     mask = labels >= 0
     n_total = n_samples if n_samples is not None else len(labels)
@@ -212,6 +264,11 @@ def compute_metrics(
     if include_stability:
         stability = _cluster_stability(X_2d, config=hdbscan_config)
 
+    # Mejora 5 — Trustworthiness
+    tw = None
+    if X_hi is not None:
+        tw = _trustworthiness(X_hi, X_2d, k=10, sample_size=500)
+
     return PipelineMetrics(
         silhouette=silhouette,
         davies_bouldin=davies_bouldin,
@@ -221,4 +278,6 @@ def compute_metrics(
         ari=ari,
         nmi=nmi,
         cluster_stability=stability,
+        trustworthiness=tw,
+        pca_variance_explained=pca_variance,
     )

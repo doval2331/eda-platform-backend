@@ -143,29 +143,64 @@ def resolve_feature_columns(
     return num, cat
 
 
+# Añadir este import al inicio del archivo si no está
+from sklearn.preprocessing import OrdinalEncoder, RobustScaler
+
+# Variables que necesitan RobustScaler
+ROBUST_SCALE_COLUMNS = {"tiempo_resolucion_horas", "coste_estimado"}
+
+# Variables ordinales con su orden definido
+ORDINAL_COLUMNS = {
+    "prioridad": [["baja", "media", "alta", "critica", "crítica"]],
+}
+
+
 def build_generic_preprocessor(
     numeric_cols: list[str],
     categorical_cols: list[str],
+    ordinal_cols: dict[str, list] | None = None,
 ) -> ColumnTransformer:
     transformers = []
-    if numeric_cols:
-        numeric_pipe = Pipeline(
-            [
-                ("imputer", SimpleImputer(strategy="median")),
+
+    # ── Numéricas con RobustScaler (outliers extremos) ──────
+    robust_cols   = [c for c in numeric_cols if c in ROBUST_SCALE_COLUMNS]
+    standard_cols = [c for c in numeric_cols if c not in ROBUST_SCALE_COLUMNS]
+
+    if robust_cols:
+        robust_pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler",  RobustScaler()),
+        ])
+        transformers.append(("robust", robust_pipe, robust_cols))
+
+    if standard_cols:
+        standard_pipe = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler",  StandardScaler()),
+        ])
+        transformers.append(("num", standard_pipe, standard_cols))
+
+    # ── Ordinales (prioridad) ────────────────────────────────
+    if ordinal_cols:
+        for col_name, categories in ordinal_cols.items():
+            ordinal_pipe = Pipeline([
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("encoder", OrdinalEncoder(
+                    categories=categories,
+                    handle_unknown="use_encoded_value",
+                    unknown_value=-1,
+                )),
                 ("scaler", StandardScaler()),
-            ]
-        )
-        transformers.append(("num", numeric_pipe, numeric_cols))
+            ])
+            transformers.append((f"ord_{col_name}", ordinal_pipe, [col_name]))
+
+    # ── Categóricas nominales (one-hot) ─────────────────────
     if categorical_cols:
-        categorical_pipe = Pipeline(
-            [
-                (
-                    "onehot",
-                    OneHotEncoder(handle_unknown="ignore", sparse_output=False),
-                ),
-            ]
-        )
+        categorical_pipe = Pipeline([
+            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ])
         transformers.append(("cat", categorical_pipe, categorical_cols))
+
     if not transformers:
         raise ValueError("No hay columnas para transformar.")
     return ColumnTransformer(transformers, remainder="drop")
@@ -177,7 +212,17 @@ def dataframe_to_features_generic(
     categorical_cols: list[str],
     preprocessor: ColumnTransformer | None = None,
 ) -> tuple[np.ndarray, ColumnTransformer]:
-    feature_cols = numeric_cols + categorical_cols
+
+    # Separar prioridad de las categóricas nominales
+    ordinal_cols_found = {}
+    cat_cols_clean = []
+    for col in categorical_cols:
+        if col in ORDINAL_COLUMNS and col in df.columns:
+            ordinal_cols_found[col] = ORDINAL_COLUMNS[col]
+        else:
+            cat_cols_clean.append(col)
+
+    feature_cols = numeric_cols + list(ordinal_cols_found.keys()) + cat_cols_clean
     missing = [c for c in feature_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Columnas no encontradas en el dataset: {missing}")
@@ -185,16 +230,23 @@ def dataframe_to_features_generic(
     data = df[feature_cols].copy()
     for col in numeric_cols:
         data[col] = pd.to_numeric(data[col], errors="coerce")
-    for col in categorical_cols:
+    for col in cat_cols_clean:
+        data[col] = data[col].astype("string").fillna("desconocido").astype(str)
+    for col in ordinal_cols_found:
         data[col] = data[col].astype("string").fillna("desconocido").astype(str)
 
     if preprocessor is None:
-        preprocessor = build_generic_preprocessor(numeric_cols, categorical_cols)
+        preprocessor = build_generic_preprocessor(
+            numeric_cols,
+            cat_cols_clean,
+            ordinal_cols=ordinal_cols_found if ordinal_cols_found else None,
+        )
         X = preprocessor.fit_transform(data)
     else:
         X = preprocessor.transform(data)
 
     return np.asarray(X, dtype=np.float64), preprocessor
+    
 
 
 def build_row_preview(row: pd.Series, id_column: str | None) -> str:

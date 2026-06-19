@@ -876,3 +876,57 @@ def get_run(
         raise HTTPException(status_code=404, detail="Ejecución no encontrada")
     _materialize_run_in_duckdb(row)
     return RunDetail(**run_to_detail(row))
+
+@router.get("/api/runs/{run_id}/cluster-profiles")
+def get_cluster_profiles(
+    run_id: str,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Devuelve el perfil operativo de cada cluster para un run específico.
+    Incluye el modo de visualización recomendado según el número de clusters.
+    """
+    import numpy as np
+    from app.services.cluster_profiler import (
+        cluster_profiler,
+        calcular_stats_globales,
+        modo_visualizacion,
+    )
+
+    # Obtener el run
+    # Por esto:
+    run = _get_run_or_404(db, run_id)
+    import json
+    result = run.result_json
+    if isinstance(result, str):
+        result = json.loads(result)
+    if not result:
+        raise HTTPException(status_code=404, detail="El run no tiene resultados")
+    # Obtener labels
+    labels = np.array(result.get("cluster_labels", []))
+    if len(labels) == 0:
+        raise HTTPException(status_code=404, detail="Sin etiquetas de cluster")
+
+    # Reconstruir DataFrame desde metadata
+    metadata = result.get("metadata", [])
+    if not metadata:
+        raise HTTPException(status_code=404, detail="Sin metadata disponible")
+
+    df_meta = pd.DataFrame(metadata)
+
+    # Calcular perfiles
+    stats_globales = calcular_stats_globales(df_meta)
+    perfiles       = cluster_profiler(df_meta, labels, stats_globales)
+
+    # Número de clusters sin ruido
+    n_clusters = len([p for p in perfiles if not p["es_ruido"]])
+    modo       = modo_visualizacion(n_clusters)
+
+    return {
+        "run_id":        run_id,
+        "n_clusters":    n_clusters,
+        "modo_viz":      modo,
+        "stats_globales": stats_globales,
+        "perfiles":      perfiles,
+    }

@@ -75,6 +75,8 @@ class PipelineMetrics(BaseModel):
     ari: float | None = None
     nmi: float | None = None
     cluster_stability: float | None = None
+    trustworthiness: float | None = None
+    pca_variance_explained: float | None = None
 
 
 class PipelineResult(BaseModel):
