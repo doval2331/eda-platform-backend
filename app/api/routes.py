@@ -68,6 +68,7 @@ from app.services.bi.bi_postgres_store import (
 from app.services.bi.metabase_dashboard import (
     MetabaseDashboardError,
     create_conversation_dashboard,
+    get_conversation_dashboard_links,
 )
 from app.services.pipeline.pipeline import run_pipeline
 from app.services.projects.project_service import (
@@ -844,7 +845,14 @@ def get_conversation_dashboard(
 
 @router.get("/api/metabase/status", response_model=MetabaseStatusResponse)
 def metabase_status(_user: Annotated[User, Depends(get_current_user)]):
-    return MetabaseStatusResponse(**get_bi_status())
+    status = get_bi_status()
+    settings = get_settings()
+    if settings.metabase_username and settings.metabase_password:
+        try:
+            status.update(get_conversation_dashboard_links())
+        except MetabaseDashboardError:
+            pass
+    return MetabaseStatusResponse(**status)
 
 
 @router.post("/api/metabase/dashboard", response_model=MetabaseDashboardCreateResponse)

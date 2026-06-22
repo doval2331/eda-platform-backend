@@ -38,6 +38,10 @@ def _dashboard_url(dashboard_id: int) -> str:
     return f"{_metabase_base_url()}/dashboard/{dashboard_id}"
 
 
+def _public_dashboard_url(public_uuid: str) -> str:
+    return f"{_metabase_base_url()}/public/dashboard/{parse.quote(public_uuid)}"
+
+
 def _card_url(card_id: int) -> str:
     return f"{_metabase_base_url()}/question/{card_id}"
 
@@ -254,6 +258,51 @@ def _create_or_reuse_dashboard(session_id: str) -> tuple[int, bool]:
     return int(dashboard_response["id"]), True
 
 
+def _dashboard_links(
+    session_id: str,
+    dashboard_id: int,
+    *,
+    ensure_public_link: bool,
+) -> dict[str, Any]:
+    detail = _json_request(
+        "GET",
+        f"/api/dashboard/{dashboard_id}",
+        session_id=session_id,
+    )
+    public_uuid = detail.get("public_uuid") if isinstance(detail, dict) else None
+    if ensure_public_link and not public_uuid:
+        public_link = _json_request(
+            "POST",
+            f"/api/dashboard/{dashboard_id}/public_link",
+            session_id=session_id,
+        )
+        if isinstance(public_link, dict):
+            public_uuid = public_link.get("uuid") or public_link.get("public_uuid")
+        if not public_uuid:
+            raise MetabaseDashboardError(
+                "Metabase no devolvio un enlace publico para integrar el dashboard. "
+                "Verifica que Public sharing este habilitado en Administracion."
+            )
+
+    return {
+        "dashboard_id": dashboard_id,
+        "dashboard_url": _dashboard_url(dashboard_id),
+        "embed_url": _public_dashboard_url(str(public_uuid)) if public_uuid else None,
+    }
+
+
+def get_conversation_dashboard_links() -> dict[str, Any]:
+    session_id = _login()
+    dashboard_id = _find_existing_dashboard_id(session_id)
+    if dashboard_id is None:
+        return {}
+    return _dashboard_links(
+        session_id,
+        dashboard_id,
+        ensure_public_link=False,
+    )
+
+
 def _replace_dashboard_cards(
     session_id: str,
     dashboard_id: int,
@@ -285,10 +334,32 @@ def _replace_dashboard_cards(
 
 
 LATEST_RUN_CTE = """
-WITH latest_run AS (
+WITH run_quality AS (
+    SELECT
+        r.run_id,
+        r.created_at,
+        COUNT(NULLIF(COALESCE(e.category, e.categoria), '')) AS category_rows,
+        COUNT(NULLIF(COALESCE(e.affected_service, e.servicio_afectado), '')) AS service_rows,
+        COUNT(NULLIF(e.severity, '')) AS severity_rows,
+        COUNT(COALESCE(e.avg_resolution_hours, e.tiempo_resolucion_horas))
+            AS resolution_rows
+    FROM bi_runs r
+    LEFT JOIN bi_evidences e ON e.run_id = r.run_id
+    GROUP BY r.run_id, r.created_at
+),
+latest_run AS (
     SELECT run_id
-    FROM bi_runs
-    ORDER BY created_at DESC
+    FROM run_quality
+    ORDER BY
+        CASE
+            WHEN category_rows > 0
+             AND service_rows > 0
+             AND severity_rows > 0
+             AND resolution_rows > 0
+            THEN 1 ELSE 0
+        END DESC,
+        (category_rows + service_rows + severity_rows + resolution_rows) DESC,
+        created_at DESC
     LIMIT 1
 )
 """
@@ -340,7 +411,10 @@ ORDER BY sla_incumplido_pct DESC NULLS LAST
 {LATEST_RUN_CTE}
 SELECT
     affected_service,
-    ROUND(CAST(avg_risk AS numeric), 2) AS riesgo_promedio,
+    ROUND(
+        CAST(COALESCE(avg_risk, 100.0 * avg_sla_breach_rate) AS numeric),
+        2
+    ) AS riesgo_promedio,
     evidence_count AS evidencias
 FROM bi_service_risk s
 JOIN latest_run r ON s.run_id = r.run_id
@@ -404,7 +478,10 @@ ORDER BY resolucion_horas DESC NULLS LAST
 SELECT
     cluster_label,
     evidence_count AS evidencias,
-    ROUND(CAST(avg_risk AS numeric), 2) AS riesgo_promedio,
+    ROUND(
+        CAST(COALESCE(avg_risk, 100.0 * avg_sla_breach_rate) AS numeric),
+        2
+    ) AS riesgo_promedio,
     ROUND(CAST(avg_sla_breach_rate AS numeric), 4) AS tasa_sla,
     ROUND(CAST(avg_resolution_hours AS numeric), 2) AS resolucion_horas
 FROM bi_cluster_summary c
@@ -460,7 +537,11 @@ def create_conversation_dashboard() -> dict[str, Any]:
         )
     _replace_dashboard_cards(session_id, dashboard_id, card_specs)
 
-    dashboard_url = _dashboard_url(dashboard_id)
+    links = _dashboard_links(
+        session_id,
+        dashboard_id,
+        ensure_public_link=True,
+    )
     return {
         "status": "ok",
         "message": (
@@ -468,8 +549,7 @@ def create_conversation_dashboard() -> dict[str, Any]:
             if created
             else "Dashboard existente actualizado en Metabase."
         ),
-        "dashboard_id": dashboard_id,
-        "dashboard_url": dashboard_url,
+        **links,
         "database_id": database_id,
         "cards": cards,
     }
