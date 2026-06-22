@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine
 
 from app.config import get_settings
+from app.services.bi.metabase_embed import embedding_is_configured
 from app.services.runs.duckdb_store import _connect, init_duckdb
 
 
@@ -50,6 +51,14 @@ def _read_duckdb(query: str, params: list[Any] | None = None) -> pd.DataFrame:
     init_duckdb()
     with _connect() as con:
         return _clean_df(con.execute(query, params or []).df())
+
+
+def _align_df_to_table(df: pd.DataFrame, con: Connection, table_name: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    table_columns = _existing_columns(con, table_name)
+    columns = [column for column in df.columns if column in table_columns]
+    return df[columns] if columns else df.iloc[0:0]
 
 
 def _existing_columns(con: Connection, table_name: str) -> set[str]:
@@ -133,7 +142,14 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             business_impact_score DOUBLE PRECISION,
             security_incidents DOUBLE PRECISION,
             downtime_hours DOUBLE PRECISION,
-            customer_satisfaction DOUBLE PRECISION
+            customer_satisfaction DOUBLE PRECISION,
+            priority TEXT,
+            channel TEXT,
+            reopen_count DOUBLE PRECISION,
+            escalation_level DOUBLE PRECISION,
+            customer_wait_minutes DOUBLE PRECISION,
+            related_incidents_count DOUBLE PRECISION,
+            short_description TEXT
         )
         """,
         """
@@ -191,7 +207,7 @@ def init_bi_schema(engine: Engine | None = None) -> None:
     with engine.begin() as con:
         for statement in statements:
             con.execute(text(statement))
-        incident_columns = {
+        evidence_extra_columns = {
             "incident_id": "TEXT",
             "categoria": "TEXT",
             "subcategoria": "TEXT",
@@ -207,9 +223,16 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             "descripcion_corta": "TEXT",
             "causa_raiz_simulada": "TEXT",
             "synthetic_segment": "TEXT",
+            "priority": "TEXT",
+            "channel": "TEXT",
+            "reopen_count": "DOUBLE PRECISION",
+            "escalation_level": "DOUBLE PRECISION",
+            "customer_wait_minutes": "DOUBLE PRECISION",
+            "related_incidents_count": "DOUBLE PRECISION",
+            "short_description": "TEXT",
         }
         evidence_columns = _existing_columns(con, "bi_evidences")
-        for column, dtype in incident_columns.items():
+        for column, dtype in evidence_extra_columns.items():
             if column not in evidence_columns:
                 con.execute(
                     text(
@@ -434,6 +457,7 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
         for table, df in frames.items():
             counts[table] = len(df)
             if not df.empty:
+                df = _align_df_to_table(df, con, table)
                 df.to_sql(
                     table,
                     con,
@@ -492,6 +516,7 @@ def get_bi_status() -> dict[str, Any]:
     }
     if not settings.bi_sync_enabled:
         status["detail"] = "BI_SYNC_ENABLED=false"
+        status["embedding_configured"] = embedding_is_configured()
         return status
 
     try:
@@ -505,4 +530,5 @@ def get_bi_status() -> dict[str, Any]:
     except Exception as exc:  # pragma: no cover - depende de servicio externo.
         status["postgres_status"] = "error"
         status["detail"] = str(exc)
+    status["embedding_configured"] = embedding_is_configured()
     return status

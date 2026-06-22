@@ -26,6 +26,7 @@ from app.schemas import (
     InsightSelectionBody,
     BiSyncResponse,
     MetabaseDashboardCreateResponse,
+    MetabaseEmbedTokenResponse,
     MetabaseStatusResponse,
     PipelineMetrics,
     ProjectCreateBody,
@@ -65,6 +66,7 @@ from app.services.bi.bi_postgres_store import (
     sync_bi_tables,
     try_sync_bi_tables,
 )
+from app.services.bi.metabase_embed import MetabaseEmbedError, create_embed_token, embedding_is_configured
 from app.services.bi.metabase_dashboard import (
     MetabaseDashboardError,
     create_conversation_dashboard,
@@ -845,6 +847,22 @@ def get_conversation_dashboard(
 @router.get("/api/metabase/status", response_model=MetabaseStatusResponse)
 def metabase_status(_user: Annotated[User, Depends(get_current_user)]):
     return MetabaseStatusResponse(**get_bi_status())
+
+
+@router.get("/api/metabase/embed-token", response_model=MetabaseEmbedTokenResponse)
+def metabase_embed_token(
+    _user: Annotated[User, Depends(get_current_user)],
+    run_id: str | None = None,
+):
+    try:
+        return MetabaseEmbedTokenResponse(**create_embed_token(run_id=run_id))
+    except MetabaseEmbedError as exc:
+        return MetabaseEmbedTokenResponse(status="error", message=str(exc))
+    except Exception as exc:
+        return MetabaseEmbedTokenResponse(
+            status="error",
+            message=f"No se pudo generar el token de incrustación: {exc}",
+        )
 
 
 @router.post("/api/metabase/dashboard", response_model=MetabaseDashboardCreateResponse)

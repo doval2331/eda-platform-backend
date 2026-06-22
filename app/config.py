@@ -1,5 +1,3 @@
-from functools import lru_cache
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +31,9 @@ class Settings(BaseSettings):
     metabase_password: str = ""
     metabase_database_name: str = "TFM IT Analytics"
     metabase_dashboard_name: str = "Dashboard IT - Evidencias conversacionales"
+    metabase_dashboard_id: int | None = None
+    metabase_embedding_secret: str = ""
+    metabase_embed_expire_minutes: int = 10
     llm_enabled: bool = False
     llm_provider: str = "openai_compatible"
     llm_api_base: str = "https://api.openai.com/v1"
@@ -58,6 +59,5 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
-@lru_cache
 def get_settings() -> Settings:
     return Settings()
