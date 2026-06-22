@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from app.services.pipeline import run_pipeline
-from app.services.pipeline_core import (
+from app.services.pipeline.pipeline import run_pipeline
+from app.services.pipeline.pipeline_core import (
     cluster_dbscan,
     cluster_hdbscan,
     compute_metrics,

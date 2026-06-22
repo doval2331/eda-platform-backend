@@ -10,28 +10,28 @@ import numpy as np
 import pandas as pd
 
 from app.schemas import EvidenceMetadata, PipelineMetrics, PipelineResult
-from app.services.dataset_store import get_dataset_csv_path, get_dataset_meta, meta_to_profile
-from app.services.it_ops_preprocess import (
+from app.services.datasets.dataset_store import get_dataset_csv_path, get_dataset_meta, meta_to_profile
+from app.services.pipeline.it_ops_preprocess import (
     build_record_preview,
     dataframe_to_features,
     load_it_ops_dataframe,
 )
-from app.services.incidents_schema import default_exclude_columns, reference_segment_series
-from app.services.tabular_preprocess import (
+from app.services.datasets.incidents_schema import default_exclude_columns, reference_segment_series
+from app.services.datasets.tabular_preprocess import (
     build_row_preview,
     dataframe_to_features_generic,
     load_tabular_csv,
     resolve_feature_columns,
 )
-from app.services.pipeline_config import load_pipeline_config
-from app.services.pipeline_core import (
+from app.services.pipeline.pipeline_config import load_pipeline_config
+from app.services.pipeline.pipeline_core import (
     cluster_dbscan,
     cluster_hdbscan,
     compute_metrics,
     reduce_2d,
     scale_features,
 )
-from app.services.synthetic_data import (
+from app.services.pipeline.synthetic_data import (
     _preview,
     generate_high_dim_features,
     seed_for_modality,

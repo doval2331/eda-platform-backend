@@ -23,7 +23,7 @@ from sklearn.metrics import (
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from app.schemas import PipelineMetrics
-from app.services.pipeline_config import load_pipeline_config
+from app.services.pipeline.pipeline_config import load_pipeline_config
 
 ReductionMethod = Literal["PCA", "t-SNE", "UMAP"]
 
@@ -81,6 +81,11 @@ def reduce_2d(
         min_dist=min_dist,
     )
     return reducer.fit_transform(X), None
+
+
+def _mcs_adaptativo(n_points: int) -> int:
+    """Tamaño mínimo de cluster HDBSCAN según el número de muestras."""
+    return max(5, min(15, n_points // 12))
 
 
 def cluster_hdbscan(X_2d: np.ndarray, *, config: dict | None = None) -> np.ndarray:

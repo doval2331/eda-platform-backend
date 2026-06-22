@@ -7,8 +7,8 @@ import unicodedata
 import pandas as pd
 
 from app.schemas import ChatResponse, InsightCandidate
-from app.services.duckdb_store import load_run_evidences
-from app.services.llm_agent import explain_with_llm
+from app.services.runs.duckdb_store import load_run_evidences
+from app.services.agents.llm_agent import explain_with_llm
 
 
 SUGGESTED_QUESTIONS = [
@@ -637,11 +637,21 @@ def _source_review_answer(
             answer += f"Hay {len(scenario_sources) - 8} fuentes adicionales no listadas en esta respuesta. "
         if project_strategy == "per_source":
             answer += (
-                "Como el escenario esta en modo analisis por fuente, cada archivo tabular genera una ejecucion. "
-                "Para comparar todas, revisa el historial del proyecto o ejecuta una estrategia unificada si aplica. "
+                "Como el escenario esta en modo analisis por fuente, cada archivo tabular genera una ejecucion "
+                "con clusters independientes. Para comparar todas, revisa el historial del proyecto o usa "
+                "unificado multifuente si quieres un solo clustering compartido. "
+            )
+        elif project_strategy == "merged":
+            answer += (
+                "Como el escenario esta en modo unificado multifuente, todas las fuentes tabulares se combinaron "
+                "en un unico clustering compartido. Los clusters pueden mezclar filas de distintas fuentes; "
+                "revisa _fuente_tipo y _fuente_nombre para interpretarlos. "
             )
         elif project_strategy == "unified":
-            answer += "Como el escenario esta en modo unificado, la lectura debe priorizar la fuente principal combinada. "
+            answer += (
+                "Como el escenario esta en modo fuente principal, la lectura debe priorizar la fuente "
+                "principal de incidencias; las demas fuentes tabulares no entraron al clustering. "
+            )
     if business_focus:
         answer += "Dentro de esa fuente, el primer foco de negocio seria " + ", ".join(business_focus) + ". "
     answer += (

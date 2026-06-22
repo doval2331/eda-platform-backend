@@ -2,10 +2,10 @@ import json
 
 import pandas as pd
 
-from app.services.agent_sampling import sample_cluster_records
-from app.services.agent_service import run_interpretation_agent, run_strategy_agent
-from app.services.agent_traceability import TraceCollector
-from app.services.duckdb_store import (
+from app.services.agents.agent_sampling import sample_cluster_records
+from app.services.agents.agent_service import run_interpretation_agent, run_strategy_agent
+from app.services.agents.agent_traceability import TraceCollector
+from app.services.runs.duckdb_store import (
     append_agent_decisions,
     list_agent_cluster_insights,
     list_agent_decisions,
