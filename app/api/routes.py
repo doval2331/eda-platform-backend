@@ -41,9 +41,9 @@ from app.schemas import (
     RunResetResponse,
     RunSummary,
 )
-from app.services.dataset_store import get_dataset_meta, save_upload
-from app.services.conversation import build_chat_response, build_suggested_questions_for_run
-from app.services.duckdb_store import (
+from app.services.datasets.dataset_store import get_dataset_meta, save_upload
+from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
+from app.services.runs.duckdb_store import (
     append_agent_decisions,
     list_agent_cluster_insights,
     list_agent_decisions,
@@ -57,20 +57,20 @@ from app.services.duckdb_store import (
     save_selected_insight,
     load_run_evidences,
 )
-from app.services.agent_service import run_interpretation_agent, run_strategy_agent
-from app.services.run_reset import delete_run, reset_all_runs
-from app.services.agent_traceability import TraceCollector
-from app.services.bi_postgres_store import (
+from app.services.agents.agent_service import run_interpretation_agent, run_strategy_agent
+from app.services.runs.run_reset import delete_run, reset_all_runs
+from app.services.agents.agent_traceability import TraceCollector
+from app.services.bi.bi_postgres_store import (
     get_bi_status,
     sync_bi_tables,
     try_sync_bi_tables,
 )
-from app.services.metabase_dashboard import (
+from app.services.bi.metabase_dashboard import (
     MetabaseDashboardError,
     create_conversation_dashboard,
 )
-from app.services.pipeline import run_pipeline
-from app.services.project_service import (
+from app.services.pipeline.pipeline import run_pipeline
+from app.services.projects.project_service import (
     add_project_source,
     create_project,
     delete_project_source,
@@ -78,10 +78,12 @@ from app.services.project_service import (
     get_project_or_404,
     list_csv_sources,
     list_projects,
+    merge_project_tabular_sources,
     primary_incidents_source,
     source_display_name,
     update_project,
 )
+from app.services.projects.project_validation import validate_project_before_run
 
 router = APIRouter()
 
@@ -406,8 +408,30 @@ def create_project_runs(
             detail="El proyecto necesita al menos una fuente tabular para analizar",
         )
 
+    try:
+        validate_project_before_run(db, project=project, user_id=user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     targets = csv_sources
-    if project.strategy == "unified":
+    merged_dataset_id: str | None = None
+    if project.strategy == "merged":
+        if len(csv_sources) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="El modo unificado multifuente requiere al menos dos fuentes tabulares.",
+            )
+        try:
+            merged_meta = merge_project_tabular_sources(
+                db,
+                project_id=project.id,
+                user_id=user.id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        merged_dataset_id = merged_meta["dataset_id"]
+        targets = []
+    elif project.strategy == "unified":
         primary = primary_incidents_source(csv_sources)
         if primary is None:
             raise HTTPException(status_code=400, detail="No hay fuente CSV válida")
@@ -415,6 +439,26 @@ def create_project_runs(
 
     runs: list[RunDetail] = []
     try:
+        if merged_dataset_id:
+            run_detail = _execute_and_persist_run(
+                db,
+                user=user,
+                modality="tabular",
+                reduction_method=body.reduction_method,
+                seed=seed,
+                n_samples=body.n_samples,
+                dataset_id=merged_dataset_id,
+                id_column="_registro_id",
+                exclude_columns=body.exclude_columns,
+                numeric_columns=body.numeric_columns,
+                categorical_columns=body.categorical_columns,
+                project_id=project.id,
+                project_name=project.name,
+                source_type="merged",
+                source_id=None,
+                source_name="Todas las fuentes (unificado)",
+            )
+            runs.append(run_detail)
         for source in targets:
             run_detail = _execute_and_persist_run(
                 db,
@@ -888,7 +932,7 @@ def get_cluster_profiles(
     Incluye el modo de visualización recomendado según el número de clusters.
     """
     import numpy as np
-    from app.services.cluster_profiler import (
+    from app.services.pipeline.cluster_profiler import (
         cluster_profiler,
         calcular_stats_globales,
         modo_visualizacion,

@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
 from app.db import AnalysisRun, SessionLocal, init_db
-from app.services.duckdb_store import clear_all_run_data, save_selected_insight
-from app.services.run_reset import reset_all_runs
+from app.services.runs.duckdb_store import clear_all_run_data, save_selected_insight
+from app.services.runs.run_reset import reset_all_runs
 
 
 def test_reset_all_runs_clears_sql_and_duckdb():

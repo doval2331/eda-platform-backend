@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
 from app.db import AnalysisRun, SessionLocal, init_db
-from app.services.duckdb_store import clear_run_data, persist_run_detail, run_exists
-from app.services.run_reset import delete_run
+from app.services.runs.duckdb_store import clear_run_data, persist_run_detail, run_exists
+from app.services.runs.run_reset import delete_run
 
 
 def test_delete_single_run_removes_sql_and_duckdb():

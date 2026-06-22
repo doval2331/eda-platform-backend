@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.dataset_store import _validate_csv_upload
+from app.services.datasets.dataset_store import _validate_csv_upload
 
 
 def test_rejects_xlsx_extension():
