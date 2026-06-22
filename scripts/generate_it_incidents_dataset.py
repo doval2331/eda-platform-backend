@@ -198,9 +198,14 @@ def _description(category: str, subcategory: str, service: str, root_cause: str)
     )
 
 
-def generate_it_incidents_dataset(n: int = 2_000, seed: int = 42) -> pd.DataFrame:
+def generate_it_incidents_dataset(
+    n: int = 2_000,
+    seed: int = 42,
+    segment_probs: list[float] | None = None,
+) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    segments = rng.choice(SEGMENTS, size=n, p=SEGMENT_PROBS)
+    probs = segment_probs if segment_probs is not None else SEGMENT_PROBS
+    segments = rng.choice(SEGMENTS, size=n, p=probs)
     rows: list[dict] = []
 
     for index, segment in enumerate(segments, start=1):

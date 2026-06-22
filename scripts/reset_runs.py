@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 from app.db import SessionLocal, init_db
-from app.services.run_reset import reset_all_runs
+from app.services.runs.run_reset import reset_all_runs
 
 
 def main() -> None:
