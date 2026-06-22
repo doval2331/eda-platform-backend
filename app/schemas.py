@@ -299,6 +299,17 @@ class MetabaseStatusResponse(BaseModel):
     postgres_status: str
     detail: str | None = None
     tables: dict[str, int] = Field(default_factory=dict)
+    embedding_configured: bool = False
+
+
+class MetabaseEmbedTokenResponse(BaseModel):
+    status: str
+    message: str | None = None
+    token: str | None = None
+    instance_url: str | None = None
+    embed_url: str | None = None
+    dashboard_id: int | None = None
+    expires_in_seconds: int | None = None
 
 
 class MetabaseDashboardCard(BaseModel):
