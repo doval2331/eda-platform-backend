@@ -11,7 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from app.services.incidents_schema import default_exclude_columns
+from app.services.datasets.incidents_schema import default_exclude_columns
 
 MAX_CATEGORICAL_CARDINALITY = 40
 MIN_FEATURE_COLUMNS = 2
@@ -52,7 +52,7 @@ def load_tabular_csv(path, *, n_samples: int | None = None, seed: int = 42) -> p
 
 def _is_likely_id(series: pd.Series, n_rows: int) -> bool:
     name = str(series.name).lower()
-    if name in {"id", "uuid", "client_id", "incident_id", "record_id", "row_id"}:
+    if name in {"id", "uuid", "client_id", "incident_id", "record_id", "row_id", "_registro_id"}:
         return True
     if series.dtype == object and series.nunique() == n_rows:
         return True

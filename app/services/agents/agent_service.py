@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 
 from app.config import get_settings
-from app.services.agent_sampling import sample_cluster_records
-from app.services.agent_traceability import TraceCollector, to_json, utc_now_iso
-from app.services.llm_agent import (
+from app.services.agents.agent_sampling import sample_cluster_records
+from app.services.agents.agent_traceability import TraceCollector, to_json, utc_now_iso
+from app.services.agents.llm_agent import (
     INTERPRETATION_SYSTEM_PROMPT,
     STRATEGY_SYSTEM_PROMPT,
     complete_json_with_llm,

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import AnalysisRun
-from app.services.duckdb_store import clear_all_run_data, clear_run_data
+from app.services.runs.duckdb_store import clear_all_run_data, clear_run_data
 
 
 BI_TABLES = (

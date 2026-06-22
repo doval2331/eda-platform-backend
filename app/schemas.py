@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 Modality = Literal["texto", "imagen", "multimodal", "it_ops", "tabular"]
 ReductionMethod = Literal["PCA", "t-SNE", "UMAP"]
-ProjectStrategy = Literal["per_source", "unified"]
+ProjectStrategy = Literal["per_source", "unified", "merged"]
 ProjectSourceType = Literal[
     "incidents",
     "change_mgmt",

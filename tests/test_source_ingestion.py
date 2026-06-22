@@ -1,4 +1,4 @@
-from app.services.source_ingestion import detect_source_kind, ingest_source
+from app.services.datasets.source_ingestion import detect_source_kind, ingest_source
 
 
 def test_ingest_csv_as_tabular_source():

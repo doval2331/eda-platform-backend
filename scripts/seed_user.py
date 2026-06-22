@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.config import get_settings
 from app.db import SessionLocal, User, init_db
-from app.services.auth import hash_password
+from app.services.auth.auth import hash_password
 
 
 def main() -> None:

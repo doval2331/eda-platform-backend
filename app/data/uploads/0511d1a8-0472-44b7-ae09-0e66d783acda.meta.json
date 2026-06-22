@@ -1,0 +1,52 @@
+{
+  "dataset_id": "0511d1a8-0472-44b7-ae09-0e66d783acda",
+  "user_id": "a6254bdc-22ce-41f1-b76c-ad6dcfae80cc",
+  "filename": "caso_02_clustering_completo.xlsx",
+  "normalized_kind": "tabular",
+  "original_format": "xlsx",
+  "extraction_method": "pandas.read_excel(openpyxl)",
+  "n_rows": 2000,
+  "n_cols": 15,
+  "numeric_columns": [
+    "tiempo_resolucion_horas",
+    "reaperturas",
+    "escalados",
+    "satisfaccion_usuario",
+    "coste_estimado"
+  ],
+  "categorical_columns": [
+    "categoria",
+    "subcategoria",
+    "prioridad",
+    "servicio_afectado",
+    "canal_entrada",
+    "sla_incumplido"
+  ],
+  "excluded_columns": [
+    "incident_id",
+    "descripcion_corta",
+    "causa_raiz_simulada",
+    "synthetic_segment"
+  ],
+  "suggested_id_column": null,
+  "all_columns": [
+    "incident_id",
+    "categoria",
+    "subcategoria",
+    "prioridad",
+    "servicio_afectado",
+    "canal_entrada",
+    "tiempo_resolucion_horas",
+    "sla_incumplido",
+    "reaperturas",
+    "escalados",
+    "satisfaccion_usuario",
+    "coste_estimado",
+    "descripcion_corta",
+    "causa_raiz_simulada",
+    "synthetic_segment"
+  ],
+  "ingestion_metadata": {
+    "sheet_name": "datos"
+  }
+}

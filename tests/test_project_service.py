@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.project_service import (
+from app.services.projects.project_service import (
     CSV_SOURCE_TYPES,
     OTHER_SOURCE_TYPES,
     TEXT_SOURCE_TYPES,

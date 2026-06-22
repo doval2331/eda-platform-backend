@@ -6,11 +6,18 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.db import Project, ProjectSource
-from app.services.dataset_store import get_dataset_meta, save_text_upload, save_upload
-from app.services.source_ingestion import detect_source_kind
+from app.services.datasets.dataset_store import (
+    get_dataset_csv_path,
+    get_dataset_meta,
+    save_dataframe_as_dataset,
+    save_text_upload,
+    save_upload,
+)
+from app.services.datasets.source_ingestion import detect_source_kind
 
 CSV_SOURCE_TYPES = frozenset({"incidents", "change_mgmt", "software", "hardware"})
 TEXT_SOURCE_TYPES = frozenset({"dictionary", "notes"})
@@ -386,3 +393,65 @@ def primary_incidents_source(sources: list[ProjectSource]) -> ProjectSource | No
             if source.source_type == preferred:
                 return source
     return sources[0] if sources else None
+
+
+def merge_project_tabular_sources(
+    db: Session,
+    *,
+    project_id: str,
+    user_id: str,
+) -> dict:
+    """Combina todas las fuentes tabulares en un único dataset para clustering compartido."""
+    project = get_project_or_404(db, project_id=project_id, user_id=user_id)
+    sources = list_csv_sources(db, project_id=project_id, user_id=user_id)
+    if len(sources) < 2:
+        raise ValueError(
+            "El modo unificado multifuente requiere al menos dos fuentes tabulares."
+        )
+
+    frames: list[pd.DataFrame] = []
+    source_summaries: list[dict] = []
+
+    for source in sources:
+        if not source.dataset_id:
+            raise ValueError(f"La fuente {source_display_name(source)} no tiene dataset asociado.")
+        meta = get_dataset_meta(source.dataset_id, user_id=user_id)
+        csv_path = get_dataset_csv_path(source.dataset_id, user_id=user_id)
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            raise ValueError(f"La fuente {source_display_name(source)} está vacía.")
+
+        label = SOURCE_TYPE_LABELS.get(source.source_type, source.source_type)
+        display = source_display_name(source)
+        df = df.copy()
+        df["_fuente_tipo"] = label
+        df["_fuente_nombre"] = display
+
+        id_col = meta.get("suggested_id_column")
+        if isinstance(id_col, str) and id_col in df.columns:
+            df["_registro_id"] = df[id_col].astype(str).map(lambda value, sid=source.id: f"{sid}:{value}")
+        else:
+            df["_registro_id"] = [f"{source.id}:{index}" for index in range(len(df))]
+
+        frames.append(df)
+        source_summaries.append(
+            {
+                "source_id": source.id,
+                "source_type": source.source_type,
+                "source_name": display,
+                "n_rows": len(df),
+            }
+        )
+
+    merged = pd.concat(frames, ignore_index=True, sort=False)
+    safe_name = (project.name or "escenario").strip().replace(" ", "_")[:80]
+    return save_dataframe_as_dataset(
+        user_id=user_id,
+        filename=f"{safe_name}_unificado.csv",
+        df=merged,
+        ingestion_metadata={
+            "merged_from_project_id": project.id,
+            "merged_sources": source_summaries,
+            "merge_strategy": "outer_concat",
+        },
+    )

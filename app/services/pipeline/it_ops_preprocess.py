@@ -11,7 +11,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from app.services.incidents_schema import (
+from app.services.datasets.incidents_schema import (
     IncidentColumnGroups,
     reference_segment_series,
     resolve_incident_column_groups,
