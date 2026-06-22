@@ -293,7 +293,9 @@ class BiSyncResponse(BaseModel):
 class MetabaseStatusResponse(BaseModel):
     enabled: bool
     metabase_url: str
+    dashboard_id: int | None = None
     dashboard_url: str | None = None
+    embed_url: str | None = None
     postgres_status: str
     detail: str | None = None
     tables: dict[str, int] = Field(default_factory=dict)
@@ -310,6 +312,7 @@ class MetabaseDashboardCreateResponse(BaseModel):
     message: str
     dashboard_id: int | None = None
     dashboard_url: str | None = None
+    embed_url: str | None = None
     database_id: int | None = None
     cards: list[MetabaseDashboardCard] = Field(default_factory=list)
 
