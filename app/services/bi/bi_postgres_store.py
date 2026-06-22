@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine
 
 from app.config import get_settings
-from app.services.duckdb_store import _connect, init_duckdb
+from app.services.runs.duckdb_store import _connect, init_duckdb
 
 
 @dataclass

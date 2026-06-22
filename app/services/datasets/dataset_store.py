@@ -6,9 +6,11 @@ import json
 import uuid
 from pathlib import Path
 
+import pandas as pd
+
 from app.config import get_settings
-from app.services.source_ingestion import ingest_source
-from app.services.tabular_preprocess import TabularColumnProfile, profile_dataframe
+from app.services.datasets.source_ingestion import ingest_source
+from app.services.datasets.tabular_preprocess import TabularColumnProfile, profile_dataframe
 
 
 def uploads_dir() -> Path:
@@ -63,6 +65,70 @@ def _validate_csv_upload(filename: str, content: bytes) -> None:
         )
 
 
+def _persist_dataframe_dataset(
+    *,
+    user_id: str,
+    filename: str,
+    df: pd.DataFrame,
+    exclude_columns: list[str] | None = None,
+    normalized_kind: str = "tabular",
+    original_format: str = "csv",
+    extraction_method: str = "pandas",
+    ingestion_metadata: dict | None = None,
+) -> dict:
+    if len(df) < 30:
+        raise ValueError("El dataset debe tener al menos 30 filas.")
+
+    profile = profile_dataframe(df, exclude_columns=exclude_columns)
+    if len(profile.numeric_columns) + len(profile.categorical_columns) < 2:
+        raise ValueError(
+            "No se detectaron suficientes columnas numéricas o categóricas para el análisis."
+        )
+
+    dataset_id = str(uuid.uuid4())
+    csv_path = _csv_path(dataset_id)
+    df.to_csv(csv_path, index=False)
+
+    meta = {
+        "dataset_id": dataset_id,
+        "user_id": user_id,
+        "filename": filename,
+        "normalized_kind": normalized_kind,
+        "original_format": original_format,
+        "extraction_method": extraction_method,
+        "n_rows": len(df),
+        "n_cols": len(df.columns),
+        "numeric_columns": profile.numeric_columns,
+        "categorical_columns": profile.categorical_columns,
+        "excluded_columns": profile.excluded_columns,
+        "suggested_id_column": profile.suggested_id_column,
+        "all_columns": profile.all_columns,
+        "ingestion_metadata": ingestion_metadata or {},
+    }
+    _meta_path(dataset_id).write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return meta
+
+
+def save_dataframe_as_dataset(
+    *,
+    user_id: str,
+    filename: str,
+    df: pd.DataFrame,
+    exclude_columns: list[str] | None = None,
+    ingestion_metadata: dict | None = None,
+) -> dict:
+    return _persist_dataframe_dataset(
+        user_id=user_id,
+        filename=filename,
+        df=df,
+        exclude_columns=exclude_columns,
+        ingestion_metadata=ingestion_metadata,
+    )
+
+
 def save_upload(
     *,
     user_id: str,
@@ -78,43 +144,16 @@ def save_upload(
             f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
         )
 
-    dataset_id = str(uuid.uuid4())
-    csv_path = _csv_path(dataset_id)
-    df = source.dataframe
-    df.to_csv(csv_path, index=False)
-
-    if len(df) < 30:
-        csv_path.unlink(missing_ok=True)
-        raise ValueError("El dataset debe tener al menos 30 filas.")
-
-    profile = profile_dataframe(df, exclude_columns=exclude_columns)
-    if len(profile.numeric_columns) + len(profile.categorical_columns) < 2:
-        csv_path.unlink(missing_ok=True)
-        raise ValueError(
-            "No se detectaron suficientes columnas numéricas o categóricas para el análisis."
-        )
-
-    meta = {
-        "dataset_id": dataset_id,
-        "user_id": user_id,
-        "filename": filename,
-        "normalized_kind": source.normalized_kind,
-        "original_format": source.original_format,
-        "extraction_method": source.extraction_method,
-        "n_rows": len(df),
-        "n_cols": len(df.columns),
-        "numeric_columns": profile.numeric_columns,
-        "categorical_columns": profile.categorical_columns,
-        "excluded_columns": profile.excluded_columns,
-        "suggested_id_column": profile.suggested_id_column,
-        "all_columns": profile.all_columns,
-        "ingestion_metadata": source.metadata,
-    }
-    _meta_path(dataset_id).write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    return _persist_dataframe_dataset(
+        user_id=user_id,
+        filename=filename,
+        df=source.dataframe,
+        exclude_columns=exclude_columns,
+        normalized_kind=source.normalized_kind,
+        original_format=source.original_format,
+        extraction_method=source.extraction_method,
+        ingestion_metadata=source.metadata,
     )
-    return meta
 
 
 def get_dataset_meta(dataset_id: str, *, user_id: str) -> dict:

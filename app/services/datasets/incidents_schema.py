@@ -27,6 +27,7 @@ IDENTIFIER_COLUMNS = (
     "client_id",
     "id",
     "record_id",
+    "_registro_id",
 )
 
 # Dataset de incidencias (esquema objetivo del TFM)
