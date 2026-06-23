@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from app.db import AnalysisRun, SessionLocal, init_db
-from app.services.runs.duckdb_store import clear_run_data, persist_run_detail, run_exists
+from app.services.runs.duckdb_store import append_chat_message, clear_run_data, persist_run_detail, run_exists
 from app.services.runs.run_reset import delete_run
 
 
@@ -49,11 +49,18 @@ def test_delete_single_run_removes_sql_and_duckdb():
         )
         db.commit()
         persist_run_detail(detail)
+        append_chat_message(
+            run_id,
+            user_id="analyst-1",
+            role="user",
+            text="¿Cuántos clusters hay?",
+        )
         assert run_exists(run_id)
 
         result = delete_run(db, run_id)
 
         assert result["run_id"] == run_id
+        assert result["duckdb_tables_cleared"]["chat_messages"] >= 1
         assert db.get(AnalysisRun, run_id) is None
         assert not run_exists(run_id)
         cleared = clear_run_data(run_id)

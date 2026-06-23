@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -158,6 +160,19 @@ def _init_duckdb_schema() -> None:
                 filter_kind VARCHAR,
                 filter_value VARCHAR,
                 selected_at TIMESTAMP
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                message_id VARCHAR PRIMARY KEY,
+                run_id VARCHAR,
+                user_id VARCHAR,
+                role VARCHAR,
+                text VARCHAR,
+                metadata_json VARCHAR,
+                created_at TIMESTAMP
             )
             """
         )
@@ -524,41 +539,75 @@ def load_run_evidences(run_id: str) -> pd.DataFrame:
             ORDER BY evidence_index
             """,
             [run_id],
-        ).df()
+        ).df(        )
+
+
+def _insight_row(
+    run_id: str,
+    insight: dict[str, Any],
+    *,
+    user_id: str | None,
+    selected_at,
+) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "user_id": user_id,
+        "insight_id": insight.get("id"),
+        "title": insight.get("title"),
+        "description": insight.get("description"),
+        "metric_label": insight.get("metric_label"),
+        "metric_value": insight.get("metric_value"),
+        "dimension": insight.get("dimension"),
+        "filter_kind": insight.get("filter_kind"),
+        "filter_value": insight.get("filter_value"),
+        "selected_at": selected_at,
+    }
 
 
 def save_selected_insight(
     run_id: str, insight: dict[str, Any], *, user_id: str | None = None
 ) -> None:
+    save_selected_insights_bulk(run_id, [insight], user_id=user_id)
+
+
+def save_selected_insights_bulk(
+    run_id: str,
+    insights: list[dict[str, Any]],
+    *,
+    user_id: str | None = None,
+) -> int:
+    if not insights:
+        return 0
+
     init_duckdb()
+    selected_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    deduped: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for insight in insights:
+        insight_id = insight.get("id")
+        if not insight_id or insight_id in seen_ids:
+            continue
+        seen_ids.add(str(insight_id))
+        deduped.append(insight)
+
+    if not deduped:
+        return 0
+
     row = pd.DataFrame(
-        [
-            {
-                "run_id": run_id,
-                "user_id": user_id,
-                "insight_id": insight.get("id"),
-                "title": insight.get("title"),
-                "description": insight.get("description"),
-                "metric_label": insight.get("metric_label"),
-                "metric_value": insight.get("metric_value"),
-                "dimension": insight.get("dimension"),
-                "filter_kind": insight.get("filter_kind"),
-                "filter_value": insight.get("filter_value"),
-                "selected_at": datetime.now(timezone.utc).replace(tzinfo=None),
-            }
-        ]
+        [_insight_row(run_id, insight, user_id=user_id, selected_at=selected_at) for insight in deduped]
     )
     with _connect() as con:
         con.register("selected_df", row)
-        con.execute(
-            """
-            DELETE FROM selected_insights
-            WHERE run_id = ?
-              AND insight_id = ?
-              AND (user_id = ? OR user_id IS NULL)
-            """,
-            [run_id, insight.get("id"), user_id],
-        )
+        for insight in deduped:
+            con.execute(
+                """
+                DELETE FROM selected_insights
+                WHERE run_id = ?
+                  AND insight_id = ?
+                  AND (user_id = ? OR user_id IS NULL)
+                """,
+                [run_id, insight.get("id"), user_id],
+            )
         con.execute(
             """
             INSERT INTO selected_insights (
@@ -589,6 +638,7 @@ def save_selected_insight(
             FROM selected_df
             """
         )
+    return len(deduped)
 
 
 def list_selected_insights(
@@ -638,6 +688,120 @@ def list_selected_insights(
     if df.empty:
         return []
     return df.where(pd.notnull(df), None).to_dict(orient="records")
+
+
+def append_chat_message(
+    run_id: str,
+    *,
+    user_id: str | None,
+    role: str,
+    text: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    init_duckdb()
+    message_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+    row = pd.DataFrame(
+        [
+            {
+                "message_id": message_id,
+                "run_id": run_id,
+                "user_id": user_id,
+                "role": role,
+                "text": text,
+                "metadata_json": metadata_json,
+                "created_at": created_at,
+            }
+        ]
+    )
+    with _connect() as con:
+        con.register("chat_message_df", row)
+        con.execute(
+            """
+            INSERT INTO chat_messages (
+                message_id,
+                run_id,
+                user_id,
+                role,
+                text,
+                metadata_json,
+                created_at
+            )
+            SELECT
+                message_id,
+                run_id,
+                user_id,
+                role,
+                text,
+                metadata_json,
+                created_at
+            FROM chat_message_df
+            """
+        )
+    return {
+        "id": message_id,
+        "run_id": run_id,
+        "role": role,
+        "text": text,
+        "metadata": metadata or {},
+        "created_at": created_at,
+    }
+
+
+def list_chat_messages(
+    *,
+    run_id: str,
+    user_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    init_duckdb()
+    filters = ["run_id = ?"]
+    params: list[Any] = [run_id]
+    if user_id:
+        filters.append("(user_id = ? OR user_id IS NULL)")
+        params.append(user_id)
+    where_clause = " AND ".join(filters)
+    safe_limit = max(1, min(int(limit), 500))
+
+    with _connect() as con:
+        df = con.execute(
+            f"""
+            SELECT
+                message_id AS id,
+                run_id,
+                role,
+                text,
+                metadata_json,
+                created_at
+            FROM chat_messages
+            WHERE {where_clause}
+            ORDER BY created_at ASC, message_id ASC
+            LIMIT {safe_limit}
+            """,
+            params,
+        ).df()
+
+    if df.empty:
+        return []
+
+    records: list[dict[str, Any]] = []
+    for row in df.to_dict(orient="records"):
+        metadata_raw = row.pop("metadata_json", None)
+        metadata: dict[str, Any] = {}
+        if metadata_raw:
+            try:
+                parsed = json.loads(metadata_raw)
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except json.JSONDecodeError:
+                metadata = {}
+        row["insights"] = metadata.get("insights") or []
+        row["llm_used"] = metadata.get("llm_used")
+        row["llm_detail"] = metadata.get("llm_detail")
+        row["llm_mode"] = metadata.get("llm_mode")
+        records.append(row)
+    return records
 
 
 def save_agent_recommendations(run_id: str, recommendations: pd.DataFrame) -> None:
@@ -806,6 +970,7 @@ RUN_DATA_TABLES = [
     "run_registry",
     "run_evidences",
     "selected_insights",
+    "chat_messages",
     "agent_strategy_recommendations",
     "agent_cluster_samples",
     "agent_cluster_insights",

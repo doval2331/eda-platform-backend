@@ -19,11 +19,16 @@ from app.schemas import (
     AgentTraceResponse,
     ChatRequest,
     ChatResponse,
+    ChatAppendMessageBody,
+    ChatHistoryResponse,
+    ChatMessageRecord,
     ChatSuggestionsResponse,
     ConversationDashboardResponse,
     DatasetProfileResponse,
     HealthResponse,
     InsightSelectionBody,
+    InsightBatchSelectionBody,
+    InsightBatchSelectionResponse,
     BiSyncResponse,
     MetabaseDashboardCreateResponse,
     MetabaseEmbedTokenResponse,
@@ -44,6 +49,7 @@ from app.schemas import (
 )
 from app.services.datasets.dataset_store import get_dataset_meta, save_upload
 from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
+from app.services.conversation.chat_history import load_history, persist_exchange, persist_note
 from app.services.runs.duckdb_store import (
     append_agent_decisions,
     list_agent_cluster_insights,
@@ -56,6 +62,7 @@ from app.services.runs.duckdb_store import (
     save_agent_cluster_samples,
     save_agent_recommendations,
     save_selected_insight,
+    save_selected_insights_bulk,
     load_run_evidences,
 )
 from app.services.agents.agent_service import run_interpretation_agent, run_strategy_agent
@@ -590,7 +597,7 @@ def chat_with_run(
             project_strategy = project_detail.get("strategy")
         except (LookupError, PermissionError):
             project_sources = []
-    return build_chat_response(
+    response = build_chat_response(
         run_id,
         body.question,
         run_context={
@@ -603,6 +610,43 @@ def chat_with_run(
         },
         history=[item.model_dump() for item in body.history[-8:]],
     )
+    persist_exchange(
+        run_id=run_id,
+        user_id=user.id,
+        question=body.question,
+        response=response,
+    )
+    return response
+
+
+@router.get("/api/runs/{run_id}/chat/history", response_model=ChatHistoryResponse)
+def get_chat_history_for_run(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    messages = load_history(run_id=run_id, user_id=user.id)
+    return ChatHistoryResponse(messages=messages)
+
+
+@router.post("/api/runs/{run_id}/chat/messages", response_model=ChatMessageRecord)
+def append_chat_message_route(
+    run_id: str,
+    body: ChatAppendMessageBody,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    message = persist_note(
+        run_id=run_id,
+        user_id=user.id,
+        text=body.text,
+        metadata=body.metadata,
+    )
+    return message
 
 
 @router.get("/api/runs/{run_id}/chat/suggestions", response_model=ChatSuggestionsResponse)
@@ -828,8 +872,27 @@ def select_run_insight(
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
     save_selected_insight(run_id, body.insight.model_dump(), user_id=_user.id)
-    try_sync_bi_tables(run_id)
     return {"status": "ok"}
+
+
+@router.post(
+    "/api/runs/{run_id}/insights/select/batch",
+    response_model=InsightBatchSelectionResponse,
+)
+def select_run_insights_batch(
+    run_id: str,
+    body: InsightBatchSelectionBody,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    saved = save_selected_insights_bulk(
+        run_id,
+        [insight.model_dump() for insight in body.insights],
+        user_id=_user.id,
+    )
+    return InsightBatchSelectionResponse(saved=saved)
 
 
 @router.get("/api/conversation-dashboard", response_model=ConversationDashboardResponse)

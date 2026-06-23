@@ -1770,6 +1770,14 @@ def _decision_alternatives(df: pd.DataFrame) -> tuple[str, list[InsightCandidate
     return answer, alternatives
 
 
+def _unmatched_message_answer() -> str:
+    return (
+        "Hola. Puedo ayudarte a explorar los datos de esta ejecucion. "
+        "Elige una pregunta sugerida o escribe que quieres revisar "
+        "(SLA, servicios, grupos, dashboard, etc.)."
+    )
+
+
 def build_chat_response(
     run_id: str,
     question: str,
@@ -1947,11 +1955,17 @@ def build_chat_response(
     if asks_next_steps:
         collect("guia_proximos_pasos", _next_steps_answer(df, run_context))
 
-    if not answer_parts and has_any("que puedo", "analizar", "explorar", "resumen"):
+    if not answer_parts and (asks_overview or has_any("que puedo", "analizar", "explorar", "resumen")):
         collect("resumen_general", _overview(df))
-
-    if not answer_parts:
-        collect("resumen_general", _overview(df))
+    elif not answer_parts:
+        return ChatResponse(
+            answer=_unmatched_message_answer(),
+            suggested_questions=suggested_questions,
+            insights=[],
+            llm_used=False,
+            llm_mode="rules",
+            llm_detail="sin_herramienta",
+        )
 
     fallback_answer = " ".join(answer_parts)
     llm_result = explain_with_llm(
