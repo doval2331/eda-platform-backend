@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -263,8 +263,37 @@ class ChatSuggestionsResponse(BaseModel):
     suggested_questions: list[str] = Field(default_factory=list)
 
 
+class ChatMessageRecord(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    text: str
+    insights: list[InsightCandidate] = Field(default_factory=list)
+    llm_used: bool | None = None
+    llm_detail: str | None = None
+    created_at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    messages: list[ChatMessageRecord] = Field(default_factory=list)
+
+
+class ChatAppendMessageBody(BaseModel):
+    role: Literal["assistant"] = "assistant"
+    text: str = Field(..., min_length=1, max_length=2000)
+    metadata: dict[str, Any] | None = None
+
+
 class InsightSelectionBody(BaseModel):
     insight: InsightCandidate
+
+
+class InsightBatchSelectionBody(BaseModel):
+    insights: list[InsightCandidate] = Field(..., min_length=1, max_length=50)
+
+
+class InsightBatchSelectionResponse(BaseModel):
+    status: str = "ok"
+    saved: int
 
 
 class SelectedInsightDashboardItem(InsightCandidate):
