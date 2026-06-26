@@ -1,0 +1,51 @@
+# Metabase en Dokploy con PostgreSQL remoto (sin contenedor postgres local).
+#
+# IMPORTANTE — si ves "failed to read Dockerfile":
+#   Creaste un servicio "Application" con build Dockerfile. Metabase NO necesita Dockerfile.
+#   Borra ese servicio y crea: Project → Create Service → COMPOSE (no Application).
+#
+# Opción A (recomendada): Compose → Source → Raw → pegar este archivo completo.
+# Opción B: Compose → Source → Git → Compose Path:
+#   docker-compose.dokploy-metabase.yml
+#   (el archivo debe estar en el repo; no uses Build Type Dockerfile).
+#
+# Environment (pestaña del servicio Compose):
+#   MB_DB_HOST=213.199.42.63
+#   MB_DB_PORT=3254
+#   MB_DB_USER=postgres
+#   MB_DB_PASS=<tu-password>
+#   MB_DB_DBNAME=metabaseappdb
+#
+# Antes del primer deploy en PostgreSQL remoto:
+#   CREATE DATABASE metabaseappdb;
+#
+# Domains → servicio metabase → puerto 3000 → tu dominio.
+
+services:
+  metabase:
+    image: metabase/metabase:v0.50.8
+    restart: unless-stopped
+    volumes:
+      - /dev/urandom:/dev/random:ro
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: ${MB_DB_HOST}
+      MB_DB_PORT: ${MB_DB_PORT:-3254}
+      MB_DB_USER: ${MB_DB_USER:-postgres}
+      MB_DB_PASS: ${MB_DB_PASS}
+      MB_DB_DBNAME: ${MB_DB_DBNAME:-metabaseappdb}
+      JAVA_TIMEZONE: ${JAVA_TIMEZONE:-Europe/Madrid}
+    expose:
+      - "3000"
+    healthcheck:
+      test: curl --fail -I http://localhost:3000/api/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 120s
+    networks:
+      - dokploy-network
+
+networks:
+  dokploy-network:
+    external: true
