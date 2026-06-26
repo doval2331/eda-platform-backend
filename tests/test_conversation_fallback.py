@@ -2,7 +2,17 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from app.services.agents.llm_agent import LlmResult
 from app.services.conversation.conversation import build_chat_response
+
+
+def _local_llm_response(**kwargs):
+    return LlmResult(
+        answer=kwargs["fallback_answer"],
+        used=False,
+        mode="rules",
+        detail="test-local",
+    )
 
 
 @patch("app.services.conversation.conversation.load_run_evidences")
@@ -30,8 +40,9 @@ def test_unmatched_message_returns_short_prompt_without_catalog(mock_load):
     assert "62.7" not in response.answer
 
 
+@patch("app.services.conversation.conversation.explain_with_llm", side_effect=_local_llm_response)
 @patch("app.services.conversation.conversation.load_run_evidences")
-def test_explicit_dynamic_questions_request_returns_catalog(mock_load):
+def test_explicit_dynamic_questions_request_returns_catalog(mock_load, _mock_llm):
     mock_load.return_value = pd.DataFrame(
         [
             {
@@ -48,8 +59,9 @@ def test_explicit_dynamic_questions_request_returns_catalog(mock_load):
     assert any(insight.id == "available-analytic-tools" for insight in response.insights)
 
 
+@patch("app.services.conversation.conversation.explain_with_llm", side_effect=_local_llm_response)
 @patch("app.services.conversation.conversation.load_run_evidences")
-def test_explicit_overview_request_still_returns_overview(mock_load):
+def test_explicit_overview_request_still_returns_overview(mock_load, _mock_llm):
     mock_load.return_value = pd.DataFrame(
         [
             {

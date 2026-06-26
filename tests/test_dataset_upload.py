@@ -22,8 +22,8 @@ def test_accepts_csv_filename_and_content():
     _validate_csv_upload("incidencias.csv", b"id,sla\n1,ok\n")
 
 
-def test_default_upload_limit_is_50_mb():
+def test_default_upload_limit_is_250_mb():
     from app.config import Settings
 
     settings = Settings()
-    assert settings.max_upload_bytes == 50 * 1024 * 1024
+    assert settings.max_upload_bytes == 250 * 1024 * 1024
