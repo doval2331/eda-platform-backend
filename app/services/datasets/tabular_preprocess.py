@@ -76,13 +76,13 @@ def profile_dataframe(
     n_rows = len(df)
 
     for col in df.columns:
-        if col in exclude:
-            excluded.append(col)
-            continue
-
         series = df[col]
         if _is_likely_id(series, n_rows):
             id_candidates.append(col)
+            excluded.append(col)
+            continue
+
+        if col in exclude:
             excluded.append(col)
             continue
 
@@ -109,7 +109,7 @@ def profile_dataframe(
                 excluded.append(col)
 
     suggested_id = None
-    for preferred in ("incident_id", "client_id", "id", "record_id", "uuid"):
+    for preferred in ("_registro_id", "incident_id", "client_id", "id", "record_id", "uuid"):
         if preferred in id_candidates:
             suggested_id = preferred
             break

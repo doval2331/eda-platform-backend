@@ -1063,3 +1063,16 @@ def get_cluster_profiles(
         "stats_globales": stats_globales,
         "perfiles":      perfiles,
     }
+@router.get("/api/metabase/embed-token")
+def get_metabase_embed_token(
+    run_id: str | None = Query(default=None),
+    _user: Annotated[User, Depends(get_current_user)] = None,
+):
+    """
+    Genera un token JWT firmado para incrustar el dashboard de Metabase
+    de forma segura en el frontend, sin exponer el secret de embedding.
+    """
+    try:
+        return create_embed_token(run_id=run_id)
+    except MetabaseEmbedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
