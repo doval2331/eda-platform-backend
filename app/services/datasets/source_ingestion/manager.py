@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import csv
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from io import BytesIO
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
@@ -44,6 +46,41 @@ def ingest_source(filename: str, content: bytes) -> IngestedSource:
             dataframe=_clean_dataframe(df),
             metadata=metadata,
         )
+    if ext in TEXT_EXTENSIONS:
+        text, method, metadata = _read_text(ext, content)
+        return IngestedSource(
+            normalized_kind=normalized_kind,
+            original_format=ext.lstrip("."),
+            extraction_method=method,
+            text=_clean_text(text),
+            metadata=metadata,
+        )
+
+    text, method, metadata = _transcribe_audio(filename, ext, content)
+    return IngestedSource(
+        normalized_kind=normalized_kind,
+        original_format=ext.lstrip("."),
+        extraction_method=method,
+        text=_clean_text(text),
+        metadata=metadata,
+    )
+
+
+def ingest_source_path(filename: str, path: str | Path) -> IngestedSource:
+    path = Path(path)
+    ext = _extension(filename)
+    normalized_kind = detect_source_kind(filename)
+    if ext in TABULAR_EXTENSIONS:
+        df, method, metadata = _read_tabular_path(ext, path)
+        return IngestedSource(
+            normalized_kind=normalized_kind,
+            original_format=ext.lstrip("."),
+            extraction_method=method,
+            dataframe=_clean_dataframe(df),
+            metadata=metadata,
+        )
+
+    content = path.read_bytes()
     if ext in TEXT_EXTENSIONS:
         text, method, metadata = _read_text(ext, content)
         return IngestedSource(
@@ -103,21 +140,81 @@ def _read_tabular(ext: str, content: bytes) -> tuple[pd.DataFrame, str, dict]:
     raise ValueError("Formato tabular no soportado.")
 
 
+def _read_tabular_path(ext: str, path: Path) -> tuple[pd.DataFrame, str, dict]:
+    if ext == ".csv":
+        df, method, metadata = _read_csv_file(path, sep=None)
+        return df, method, metadata
+    if ext == ".tsv":
+        df, method, metadata = _read_csv_file(path, sep="\t")
+        return df, method, metadata
+    if ext in {".xlsx", ".xlsm"}:
+        return _read_excel_workbook(path.read_bytes())
+    if ext == ".json":
+        return _read_json_table(path.read_bytes()), "pandas.read_json/json_normalize", {}
+    if ext == ".parquet":
+        try:
+            return pd.read_parquet(path), "pandas.read_parquet", {}
+        except ImportError as exc:
+            raise ValueError(
+                "Para leer Parquet instala pyarrow o fastparquet, o exporta el archivo a CSV."
+            ) from exc
+    raise ValueError("Formato tabular no soportado.")
+
+
 def _read_csv_like(stream: BytesIO, *, sep: str | None) -> pd.DataFrame:
     last_error: Exception | None = None
+    effective_sep = sep or _detect_csv_separator_from_bytes(stream.getvalue())
     for encoding in ("utf-8-sig", "utf-8", "latin-1"):
         stream.seek(0)
         try:
-            kwargs = {"encoding": encoding}
-            if sep is None:
-                kwargs["sep"] = None
-                kwargs["engine"] = "python"
-            else:
-                kwargs["sep"] = sep
-            return pd.read_csv(stream, **kwargs)
+            return pd.read_csv(stream, sep=effective_sep, encoding=encoding, engine="c")
         except Exception as exc:  # pragma: no cover - last error is reported
             last_error = exc
     raise ValueError(f"No se pudo leer el archivo tabular: {last_error}")
+
+
+def _read_csv_file(path: Path, *, sep: str | None) -> tuple[pd.DataFrame, str, dict]:
+    last_error: Exception | None = None
+    effective_sep = sep or _detect_csv_separator_from_path(path)
+    attempts = [
+        ("pyarrow", "utf-8-sig"),
+        ("pyarrow", "utf-8"),
+        ("c", "utf-8-sig"),
+        ("c", "utf-8"),
+        ("c", "latin-1"),
+    ]
+    for engine, encoding in attempts:
+        try:
+            df = pd.read_csv(path, sep=effective_sep, encoding=encoding, engine=engine)
+            return (
+                df,
+                f"pandas.read_csv({engine})",
+                {"separator": effective_sep, "encoding": encoding},
+            )
+        except Exception as exc:  # pragma: no cover - depends on local parsers/encodings
+            last_error = exc
+    raise ValueError(f"No se pudo leer el archivo tabular: {last_error}")
+
+
+def _detect_csv_separator_from_path(path: Path) -> str:
+    sample = path.read_bytes()[:65536]
+    return _detect_csv_separator_from_bytes(sample)
+
+
+def _detect_csv_separator_from_bytes(sample: bytes) -> str:
+    text = ""
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            text = sample.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not text.strip():
+        return ","
+    try:
+        return csv.Sniffer().sniff(text, delimiters=",;\t|").delimiter
+    except csv.Error:
+        return ","
 
 
 def _read_excel_workbook(content: bytes) -> tuple[pd.DataFrame, str, dict]:
