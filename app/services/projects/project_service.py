@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -15,7 +16,9 @@ from app.services.datasets.dataset_store import (
     get_dataset_meta,
     save_dataframe_as_dataset,
     save_text_upload,
+    save_text_upload_from_path,
     save_upload,
+    save_upload_from_path,
 )
 from app.services.datasets.source_ingestion import detect_source_kind
 
@@ -272,6 +275,55 @@ def add_csv_source(
     return get_project_detail(db, project_id=project_id, user_id=user_id)
 
 
+def add_csv_source_from_path(
+    db: Session,
+    *,
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_name: str | None = None,
+    filename: str,
+    path: Path,
+) -> dict:
+    if source_type not in CSV_SOURCE_TYPES | OTHER_SOURCE_TYPES:
+        raise ValueError(f"Tipo de fuente tabular no valido: {source_type}")
+
+    project = get_project_or_404(db, project_id=project_id, user_id=user_id)
+
+    meta = save_upload_from_path(user_id=user_id, filename=filename, path=path)
+    now = _now()
+    row = ProjectSource(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        source_type=source_type,
+        dataset_id=meta["dataset_id"],
+        filename=filename,
+        n_rows=meta["n_rows"],
+        meta_json=json.dumps(
+            {
+                "source_name": _source_display_name(filename, source_name),
+                "processing_status": "processed",
+                "normalized_kind": meta.get("normalized_kind"),
+                "original_format": meta.get("original_format"),
+                "extraction_method": meta.get("extraction_method"),
+                "n_cols": meta.get("n_cols"),
+                "numeric_columns": meta["numeric_columns"],
+                "categorical_columns": meta["categorical_columns"],
+                "excluded_columns": meta.get("excluded_columns", []),
+                "suggested_id_column": meta.get("suggested_id_column"),
+                "all_columns": meta.get("all_columns", []),
+                "ingestion_metadata": meta.get("ingestion_metadata", {}),
+            },
+            ensure_ascii=False,
+        ),
+        created_at=now,
+    )
+    db.add(row)
+    project.updated_at = now
+    db.commit()
+    return get_project_detail(db, project_id=project_id, user_id=user_id)
+
+
 def add_text_source(
     db: Session,
     *,
@@ -288,6 +340,52 @@ def add_text_source(
     project = get_project_or_404(db, project_id=project_id, user_id=user_id)
 
     meta = save_text_upload(user_id=user_id, filename=filename, content=content)
+    now = _now()
+    row = ProjectSource(
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        source_type=source_type,
+        dataset_id=meta["text_id"],
+        filename=filename,
+        n_rows=None,
+        meta_json=json.dumps(
+            {
+                "source_name": _source_display_name(filename, source_name),
+                "processing_status": "processed",
+                "normalized_kind": meta.get("normalized_kind"),
+                "original_format": meta.get("original_format"),
+                "extraction_method": meta.get("extraction_method"),
+                "char_count": meta["char_count"],
+                "word_count": meta.get("word_count"),
+                "preview": meta.get("preview", ""),
+                "ingestion_metadata": meta.get("ingestion_metadata", {}),
+            },
+            ensure_ascii=False,
+        ),
+        created_at=now,
+    )
+    db.add(row)
+    project.updated_at = now
+    db.commit()
+    return get_project_detail(db, project_id=project_id, user_id=user_id)
+
+
+def add_text_source_from_path(
+    db: Session,
+    *,
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_name: str | None = None,
+    filename: str,
+    path: Path,
+) -> dict:
+    if source_type not in TEXT_SOURCE_TYPES | OTHER_SOURCE_TYPES:
+        raise ValueError(f"Tipo de fuente de texto no valido: {source_type}")
+
+    project = get_project_or_404(db, project_id=project_id, user_id=user_id)
+
+    meta = save_text_upload_from_path(user_id=user_id, filename=filename, path=path)
     now = _now()
     row = ProjectSource(
         id=str(uuid.uuid4()),
@@ -363,6 +461,43 @@ def add_project_source(
         source_name=source_name,
         filename=filename,
         content=content,
+    )
+
+
+def add_project_source_from_path(
+    db: Session,
+    *,
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_name: str | None = None,
+    filename: str,
+    path: Path,
+) -> dict:
+    if source_type not in ALL_SOURCE_TYPES:
+        raise ValueError(f"Tipo de fuente no valido: {source_type}")
+
+    normalized_kind = detect_source_kind(filename)
+    resolved_type = _resolve_source_type_for_kind(source_type, normalized_kind)
+
+    if normalized_kind == "tabular":
+        return add_csv_source_from_path(
+            db,
+            project_id=project_id,
+            user_id=user_id,
+            source_type=resolved_type,
+            source_name=source_name,
+            filename=filename,
+            path=path,
+        )
+    return add_text_source_from_path(
+        db,
+        project_id=project_id,
+        user_id=user_id,
+        source_type=resolved_type,
+        source_name=source_name,
+        filename=filename,
+        path=path,
     )
 
 

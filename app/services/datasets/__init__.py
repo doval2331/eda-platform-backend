@@ -5,9 +5,11 @@ from app.services.datasets.dataset_store import (
     meta_to_profile,
     save_dataframe_as_dataset,
     save_text_upload,
+    save_text_upload_from_path,
     save_upload,
+    save_upload_from_path,
 )
-from app.services.datasets.source_ingestion import detect_source_kind, ingest_source
+from app.services.datasets.source_ingestion import detect_source_kind, ingest_source, ingest_source_path
 from app.services.datasets.tabular_preprocess import TabularColumnProfile, profile_dataframe
 
 __all__ = [
@@ -17,9 +19,12 @@ __all__ = [
     "get_dataset_meta",
     "get_text_content",
     "ingest_source",
+    "ingest_source_path",
     "meta_to_profile",
     "profile_dataframe",
     "save_dataframe_as_dataset",
     "save_text_upload",
+    "save_text_upload_from_path",
     "save_upload",
+    "save_upload_from_path",
 ]

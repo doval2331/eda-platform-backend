@@ -168,6 +168,19 @@ class ProjectDetail(ProjectSummary):
     sources: list[ProjectSourceSummary] = Field(default_factory=list)
 
 
+class ProjectSourceUploadJobResponse(BaseModel):
+    job_id: str
+    project_id: str
+    status: Literal["queued", "processing", "completed", "failed"]
+    message: str
+    filename: str
+    source_type: ProjectSourceType
+    source_name: str | None = None
+    uploaded_bytes: int | None = None
+    error: str | None = None
+    project: ProjectDetail | None = None
+
+
 class ProjectRunCreateBody(BaseModel):
     reduction_method: ReductionMethod = "UMAP"
     seed: int | None = None

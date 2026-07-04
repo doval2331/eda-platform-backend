@@ -1,14 +1,18 @@
 import json
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.config import get_settings
-from app.db import AnalysisRun, User, get_db, run_to_detail, save_run
+from app.db import AnalysisRun, SessionLocal, User, get_db, run_to_detail, save_run
 from app.schemas import (
     AgentHumanDecisionRequest,
     AgentHumanDecisionResponse,
@@ -38,6 +42,7 @@ from app.schemas import (
     ProjectDetail,
     ProjectRunCreateBody,
     ProjectRunResponse,
+    ProjectSourceUploadJobResponse,
     ProjectSourceType,
     ProjectSummary,
     ProjectUpdateBody,
@@ -47,7 +52,7 @@ from app.schemas import (
     RunResetResponse,
     RunSummary,
 )
-from app.services.datasets.dataset_store import get_dataset_meta, save_upload
+from app.services.datasets.dataset_store import get_dataset_meta, save_upload, uploads_dir
 from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
 from app.services.conversation.chat_history import load_history, persist_exchange, persist_note
 from app.services.runs.duckdb_store import (
@@ -82,6 +87,7 @@ from app.services.bi.metabase_dashboard import (
 from app.services.pipeline.pipeline import run_pipeline
 from app.services.projects.project_service import (
     add_project_source,
+    add_project_source_from_path,
     create_project,
     delete_project_source,
     get_project_detail,
@@ -96,6 +102,113 @@ from app.services.projects.project_service import (
 from app.services.projects.project_validation import validate_project_before_run
 
 router = APIRouter()
+
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+_upload_jobs: dict[str, dict] = {}
+_upload_jobs_lock = threading.Lock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _set_upload_job(job_id: str, **changes) -> dict:
+    with _upload_jobs_lock:
+        job = _upload_jobs.setdefault(job_id, {"job_id": job_id})
+        job.update(changes)
+        job["updated_at"] = _utc_now_iso()
+        return dict(job)
+
+
+def _get_upload_job(job_id: str) -> dict | None:
+    with _upload_jobs_lock:
+        job = _upload_jobs.get(job_id)
+        return dict(job) if job else None
+
+
+def _public_upload_job(job: dict) -> ProjectSourceUploadJobResponse:
+    return ProjectSourceUploadJobResponse(
+        job_id=str(job["job_id"]),
+        project_id=str(job["project_id"]),
+        status=job.get("status", "queued"),
+        message=str(job.get("message") or ""),
+        filename=str(job.get("filename") or ""),
+        source_type=job.get("source_type"),
+        source_name=job.get("source_name"),
+        uploaded_bytes=job.get("uploaded_bytes"),
+        error=job.get("error"),
+        project=job.get("project"),
+    )
+
+
+async def _stream_upload_to_temp(file: UploadFile, filename: str, job_id: str) -> tuple[Path, int]:
+    incoming_dir = uploads_dir() / "_incoming"
+    incoming_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = incoming_dir / f"{job_id}{Path(filename).suffix}"
+    max_bytes = get_settings().max_upload_bytes
+    uploaded = 0
+
+    try:
+        with temp_path.open("wb") as dest:
+            while True:
+                chunk = await file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                uploaded += len(chunk)
+                if uploaded > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"El archivo supera el límite de {max_bytes // (1024 * 1024)} MB",
+                    )
+                dest.write(chunk)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+
+    return temp_path, uploaded
+
+
+def _process_project_source_upload_job(job_id: str) -> None:
+    job = _get_upload_job(job_id)
+    if not job:
+        return
+
+    _set_upload_job(
+        job_id,
+        status="processing",
+        message="Procesando archivo y perfilando columnas.",
+    )
+    temp_path = Path(str(job["temp_path"]))
+    db = SessionLocal()
+    try:
+        detail = add_project_source_from_path(
+            db,
+            project_id=str(job["project_id"]),
+            user_id=str(job["user_id"]),
+            source_type=str(job["source_type"]),
+            source_name=job.get("source_name"),
+            filename=str(job["filename"]),
+            path=temp_path,
+        )
+        _set_upload_job(
+            job_id,
+            status="completed",
+            message="Fuente procesada y agregada al escenario.",
+            project=detail,
+            error=None,
+        )
+    except Exception as exc:
+        _set_upload_job(
+            job_id,
+            status="failed",
+            message="No se pudo procesar la fuente.",
+            error=str(exc),
+        )
+    finally:
+        db.close()
+        temp_path.unlink(missing_ok=True)
 
 
 def _bi_sync_response(run_id: str | None = None) -> BiSyncResponse:
@@ -337,8 +450,67 @@ def update_project_route(
     return ProjectDetail(**detail)
 
 
-@router.post("/api/projects/{project_id}/sources", response_model=ProjectDetail)
+@router.post(
+    "/api/projects/{project_id}/sources",
+    response_model=ProjectSourceUploadJobResponse,
+    status_code=202,
+)
 async def upload_project_source(
+    project_id: str,
+    source_type: ProjectSourceType,
+    background_tasks: BackgroundTasks,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    source_name: str | None = Form(None),
+    file: UploadFile = File(...),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Nombre de archivo requerido")
+    try:
+        get_project_or_404(db, project_id=project_id, user_id=user.id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    job_id = str(uuid.uuid4())
+    temp_path, uploaded_bytes = await _stream_upload_to_temp(file, file.filename, job_id)
+    job = _set_upload_job(
+        job_id,
+        project_id=project_id,
+        user_id=user.id,
+        source_type=source_type,
+        source_name=source_name,
+        filename=file.filename,
+        temp_path=str(temp_path),
+        uploaded_bytes=uploaded_bytes,
+        status="queued",
+        message="Archivo recibido. Procesamiento en cola.",
+        created_at=_utc_now_iso(),
+        project=None,
+        error=None,
+    )
+    background_tasks.add_task(_process_project_source_upload_job, job_id)
+    return _public_upload_job(job)
+
+
+@router.get(
+    "/api/projects/{project_id}/sources/jobs/{job_id}",
+    response_model=ProjectSourceUploadJobResponse,
+)
+def get_project_source_upload_job(
+    project_id: str,
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    job = _get_upload_job(job_id)
+    if not job or job.get("project_id") != project_id or job.get("user_id") != user.id:
+        raise HTTPException(status_code=404, detail="Job de carga no encontrado")
+    return _public_upload_job(job)
+
+
+@router.post("/api/projects/{project_id}/sources/sync", response_model=ProjectDetail)
+async def upload_project_source_sync(
     project_id: str,
     source_type: ProjectSourceType,
     db: Annotated[Session, Depends(get_db)],
@@ -346,6 +518,7 @@ async def upload_project_source(
     source_name: str | None = Form(None),
     file: UploadFile = File(...),
 ):
+    """Compatibilidad para clientes antiguos; el frontend usa la carga asincrona."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Nombre de archivo requerido")
     content = await file.read()

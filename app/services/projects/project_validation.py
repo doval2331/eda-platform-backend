@@ -13,7 +13,6 @@ from app.services.projects.project_service import (
     primary_incidents_source,
     source_display_name,
 )
-from app.services.datasets.tabular_preprocess import profile_dataframe
 
 MIN_ROWS = 30
 MIN_FEATURE_COLUMNS = 2
@@ -78,30 +77,19 @@ def _preview_merged_profile(
     *,
     user_id: str,
 ) -> tuple[set[str], int]:
-    """Devuelve columnas compartidas entre fuentes y recuento de features tras unir."""
-    frames: list[pd.DataFrame] = []
+    """Devuelve columnas compartidas y recuento de features usando metadata guardada."""
     feature_sets: list[set[str]] = []
 
     for source in sources:
-        df, meta = _load_source_frame(source, user_id=user_id)
+        if not source.dataset_id:
+            raise ValueError(f"La fuente {source_display_name(source)} no tiene dataset asociado.")
+        meta = get_dataset_meta(source.dataset_id, user_id=user_id)
         feature_sets.append(_feature_columns(meta))
-        label = source.source_type
-        display = source_display_name(source)
-        part = df.copy()
-        part["_fuente_tipo"] = label
-        part["_fuente_nombre"] = display
-        id_col = meta.get("suggested_id_column")
-        if isinstance(id_col, str) and id_col in part.columns:
-            part["_registro_id"] = part[id_col].astype(str).map(
-                lambda value, sid=source.id: f"{sid}:{value}"
-            )
-        else:
-            part["_registro_id"] = [f"{source.id}:{index}" for index in range(len(part))]
-        frames.append(part)
 
-    merged = pd.concat(frames, ignore_index=True, sort=False)
-    profile = profile_dataframe(merged)
-    feature_count = len(profile.numeric_columns) + len(profile.categorical_columns)
+    feature_union = set.union(*feature_sets) if feature_sets else set()
+    feature_union |= {"_fuente_tipo", "_fuente_nombre"}
+    feature_union -= {"_registro_id"}
+    feature_count = len(feature_union)
 
     shared = set.intersection(*feature_sets) if feature_sets else set()
     shared -= {"_fuente_tipo", "_fuente_nombre", "_registro_id"}
