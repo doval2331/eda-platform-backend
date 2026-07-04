@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.config import get_settings
-from app.services.datasets.source_ingestion import ingest_source
+from app.services.datasets.source_ingestion import ingest_source, ingest_source_path
 from app.services.datasets.tabular_preprocess import TabularColumnProfile, profile_dataframe
 
 
@@ -136,13 +136,40 @@ def save_upload(
     content: bytes,
     exclude_columns: list[str] | None = None,
 ) -> dict:
-    source = ingest_source(filename, content)
-    if source.normalized_kind != "tabular" or source.dataframe is None:
-        raise ValueError("Esta fuente debe ser tabular: CSV, TSV, Excel, JSON o Parquet.")
     if len(content) > get_settings().max_upload_bytes:
         raise ValueError(
             f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
         )
+    source = ingest_source(filename, content)
+    if source.normalized_kind != "tabular" or source.dataframe is None:
+        raise ValueError("Esta fuente debe ser tabular: CSV, TSV, Excel, JSON o Parquet.")
+
+    return _persist_dataframe_dataset(
+        user_id=user_id,
+        filename=filename,
+        df=source.dataframe,
+        exclude_columns=exclude_columns,
+        normalized_kind=source.normalized_kind,
+        original_format=source.original_format,
+        extraction_method=source.extraction_method,
+        ingestion_metadata=source.metadata,
+    )
+
+
+def save_upload_from_path(
+    *,
+    user_id: str,
+    filename: str,
+    path: Path,
+    exclude_columns: list[str] | None = None,
+) -> dict:
+    if path.stat().st_size > get_settings().max_upload_bytes:
+        raise ValueError(
+            f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
+        )
+    source = ingest_source_path(filename, path)
+    if source.normalized_kind != "tabular" or source.dataframe is None:
+        raise ValueError("Esta fuente debe ser tabular: CSV, TSV, Excel, JSON o Parquet.")
 
     return _persist_dataframe_dataset(
         user_id=user_id,
@@ -195,6 +222,50 @@ def save_text_upload(
         )
 
     source = ingest_source(filename, content)
+    if source.normalized_kind != "text" or not source.text:
+        raise ValueError("Esta fuente debe ser documental o audio: TXT, MD, DOCX, PDF o audio.")
+
+    text = source.text.strip()
+    if not text:
+        raise ValueError("El archivo de texto está vacío.")
+    if len(text) > max_chars:
+        raise ValueError(f"El texto supera el límite de {max_chars} caracteres.")
+
+    text_id = str(uuid.uuid4())
+    _text_path(text_id).write_text(text, encoding="utf-8")
+    preview = text[:400].replace("\n", " ")
+    meta = {
+        "text_id": text_id,
+        "user_id": user_id,
+        "filename": filename,
+        "normalized_kind": source.normalized_kind,
+        "original_format": source.original_format,
+        "extraction_method": source.extraction_method,
+        "char_count": len(text),
+        "word_count": len(text.split()),
+        "preview": preview,
+        "ingestion_metadata": source.metadata,
+    }
+    _text_meta_path(text_id).write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return meta
+
+
+def save_text_upload_from_path(
+    *,
+    user_id: str,
+    filename: str,
+    path: Path,
+    max_chars: int = 500_000,
+) -> dict:
+    if path.stat().st_size > get_settings().max_upload_bytes:
+        raise ValueError(
+            f"El archivo supera el límite de {get_settings().max_upload_bytes // (1024 * 1024)} MB"
+        )
+
+    source = ingest_source_path(filename, path)
     if source.normalized_kind != "text" or not source.text:
         raise ValueError("Esta fuente debe ser documental o audio: TXT, MD, DOCX, PDF o audio.")
 
