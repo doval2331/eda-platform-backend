@@ -246,6 +246,7 @@ def explain_with_llm(
     tool_summaries: list[dict[str, Any]],
     fallback_answer: str,
     conversation_history: list[dict[str, str]] | None = None,
+    document_context: str | None = None,
 ) -> LlmResult:
     result = complete_with_llm(
         system_prompt=SYSTEM_PROMPT,
@@ -254,9 +255,11 @@ def explain_with_llm(
             "historial_reciente": conversation_history or [],
             "resumenes_agregados": tool_summaries,
             "respuesta_base": fallback_answer,
+            "contexto_documental": document_context or "",
             "instruccion": (
                 "Reescribe la respuesta base en lenguaje simple. "
                 "Usa solo los resumenes agregados y respeta la intencion de la pregunta. "
+                "Si hay contexto_documental relacionado, mencionalo solo cuando aporte al analisis. "
                 "No repitas una respuesta generica si hay una herramienta especifica. "
                 "Mantene una extension similar. "
                 "Si el usuario pregunta por una fuente o archivo, responde con el "

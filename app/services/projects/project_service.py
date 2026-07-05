@@ -87,6 +87,10 @@ def _source_to_summary(row: ProjectSource) -> dict:
         "all_columns": meta.get("all_columns", []),
         "numeric_columns": meta.get("numeric_columns", []),
         "categorical_columns": meta.get("categorical_columns", []),
+        "relationship_status": meta.get("relationship_status"),
+        "relationship_score": meta.get("relationship_score"),
+        "relationship_reason": meta.get("relationship_reason"),
+        "content_summary": meta.get("content_summary"),
     }
 
 

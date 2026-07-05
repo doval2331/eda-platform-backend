@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,7 @@ from app.services.datasets.tabular_preprocess import (
     load_tabular_csv,
     resolve_feature_columns,
 )
-from app.services.pipeline.pipeline_config import load_pipeline_config
+from app.services.pipeline.pipeline_config import load_pipeline_config, merge_pipeline_config
 from app.services.pipeline.pipeline_core import (
     cluster_dbscan,
     cluster_hdbscan,
@@ -98,6 +98,28 @@ def _pipeline_metrics(
         pca_variance=pca_variance,
     )
 
+def _tuning_snapshot(
+    cfg: dict,
+    overrides: dict[str, Any] | None,
+) -> dict[str, float | int] | None:
+    if not overrides:
+        return None
+    mapping = {
+        "umap_n_neighbors": ("umap", "n_neighbors"),
+        "umap_min_dist": ("umap", "min_dist"),
+        "hdbscan_min_cluster_size": ("hdbscan", "min_cluster_size"),
+        "hdbscan_min_samples": ("hdbscan", "min_samples"),
+        "dbscan_eps": ("dbscan", "eps"),
+    }
+    snap: dict[str, float | int] = {}
+    for key, (section, field) in mapping.items():
+        if overrides.get(key) is not None:
+            val = cfg.get(section, {}).get(field)
+            if val is not None:
+                snap[key] = val
+    return snap or None
+
+
 def _build_pipeline_result(
     *,
     X_scaled: np.ndarray,
@@ -109,6 +131,7 @@ def _build_pipeline_result(
     metadata: list[EvidenceMetadata],
     labels_hdb: np.ndarray | None = None,
     pca_variance: float | None = None,
+    tuning_overrides: dict[str, Any] | None = None,
 ) -> PipelineResult:
     if labels_hdb is None:
         labels_hdb = cluster_hdbscan(X_2d, config=cfg)
@@ -133,6 +156,11 @@ def _build_pipeline_result(
         n_samples=n_samples,
         include_stability=False,
     )
+    tuning_snap = _tuning_snapshot(cfg, tuning_overrides)
+    if tuning_snap:
+        metrics_hdb = metrics_hdb.model_copy(
+            update={"pipeline_tuning_applied": tuning_snap},
+        )
     return PipelineResult(
         X_2d=X_2d.tolist(),
         cluster_labels=labels_hdb.astype(int).tolist(),
@@ -363,12 +391,14 @@ def run_pipeline(
     exclude_columns: list[str] | None = None,
     numeric_columns: list[str] | None = None,
     categorical_columns: list[str] | None = None,
+    pipeline_overrides: dict[str, Any] | None = None,
 ) -> PipelineResult:
     effective_seed = (
         seed
         if modality in ("it_ops", "tabular")
         else seed_for_modality(modality, seed)
     )
+    cfg = merge_pipeline_config(load_pipeline_config(), pipeline_overrides)
 
     if modality == "tabular":
         if not dataset_id or not user_id:
@@ -386,9 +416,6 @@ def run_pipeline(
             ),
         )
         X, _ = dataframe_to_features_generic(df, num_cols, cat_cols)
-        cfg = load_pipeline_config()
-        # Mejora 1: eliminado double scaling
-        # dataframe_to_features_generic ya aplica StandardScaler internamente
         X_2d, pca_variance = reduce_2d(X, reduction_method, effective_seed, config=cfg)
         labels_hdb = cluster_hdbscan(X_2d, config=cfg)
         id_col = id_column or profile.suggested_id_column
@@ -408,6 +435,7 @@ def run_pipeline(
             metadata=metadata,
             labels_hdb=labels_hdb,
             pca_variance=pca_variance,
+            tuning_overrides=pipeline_overrides,
         )
         
 
@@ -418,7 +446,6 @@ def run_pipeline(
             seed=effective_seed,
         )
         X, _, _meta, _groups = dataframe_to_features(df)
-        cfg = load_pipeline_config()
         X_scaled = scale_features(X)
         
 
@@ -430,7 +457,6 @@ def run_pipeline(
         n_clusters=n_true_clusters,
         seed=effective_seed,
     )
-    cfg = load_pipeline_config()
     X_scaled = scale_features(X)
     X_2d, pca_variance = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
     labels_hdb = cluster_hdbscan(X_2d, config=cfg)
@@ -447,4 +473,5 @@ def run_pipeline(
         metadata=metadata,
         labels_hdb=labels_hdb,
         pca_variance=pca_variance,
+        tuning_overrides=pipeline_overrides,
     )

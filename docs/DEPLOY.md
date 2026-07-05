@@ -49,3 +49,46 @@ docker compose up -d
 ```
 
 Restringe el puerto `5432` con firewall; accede a DBeaver por túnel SSH si hace falta.
+
+## 4. Dokploy (VPS)
+
+Plantillas: [`.env.dokploy.example`](../.env.dokploy.example) (backend) y en el repo frontend `.env.dokploy.example`.
+
+### Backend (Application + Dockerfile)
+
+| Ajuste | Valor |
+|--------|--------|
+| Build type | **Dockerfile** |
+| Docker File | `Dockerfile` |
+| Docker Context Path | `.` |
+| Domain → Container port | **8000** |
+
+**PostgreSQL:** en el servicio Database, copia *Internal Credentials* (host interno, p. ej. `tfm-doval-eda-qmitk7`).
+
+```env
+DATABASE_URL=postgresql+psycopg2://postgres:PASSWORD@tfm-doval-eda-qmitk7:5432/postgres
+JWT_SECRET=<secreto-largo>
+CORS_ORIGINS=https://tu-frontend.dominio.com
+BI_SYNC_ENABLED=false
+```
+
+No uses `127.0.0.1` ni `host.docker.internal` en el backend desplegado.
+
+Tras el primer deploy en verde:
+
+```bash
+python scripts/seed_user.py
+curl https://tu-backend.dominio.com/health
+```
+
+### Frontend (Application + Nixpacks)
+
+Variables en **Environment** antes del build:
+
+```env
+VITE_API_BASE=https://tu-backend.dominio.com
+```
+
+### Metabase
+
+Servicio **Compose** con [`docker-compose.dokploy-metabase.yml`](../docker-compose.dokploy-metabase.yml), no Application con Dockerfile. Ver comentarios al inicio de ese archivo.

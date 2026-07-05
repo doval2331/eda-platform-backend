@@ -10,6 +10,9 @@ data/*.csv
 data/*.duckdb
 data/uploads/*
 !data/uploads/.gitkeep
+app/data/uploads/
+data/demo-validacion-fuentes/
+data/fixtures/
 !data/.gitkeep
 notebooks/.ipynb_checkpoints/
 notebooks/artifacts/*

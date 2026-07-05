@@ -69,6 +69,7 @@ class AnalysisRun(Base):
     source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     project_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 def _engine():
@@ -95,6 +96,7 @@ def _ensure_analysis_run_columns() -> None:
         "source_id": "VARCHAR(36)",
         "source_name": "VARCHAR(200)",
         "project_name": "VARCHAR(200)",
+        "dataset_id": "VARCHAR(36)",
     }
     with engine.begin() as conn:
         if url.startswith("sqlite"):
@@ -152,6 +154,7 @@ def save_run(db: Session, *, payload: dict) -> AnalysisRun:
         source_id=payload.get("source_id"),
         source_name=payload.get("source_name"),
         project_name=payload.get("project_name"),
+        dataset_id=payload.get("dataset_id"),
     )
     db.add(row)
     db.commit()
@@ -181,4 +184,5 @@ def run_to_detail(row: AnalysisRun) -> dict:
         "source_id": row.source_id,
         "source_name": row.source_name,
         "project_name": row.project_name,
+        "dataset_id": row.dataset_id,
     }

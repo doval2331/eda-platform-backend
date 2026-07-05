@@ -65,6 +65,7 @@ def run_strategy_agent(
     sample_criteria: str,
     model_name: str,
     tracer: TraceCollector,
+    document_context: str | None = None,
 ) -> tuple[pd.DataFrame, AgentRunMeta]:
     use_llm = llm_ready() and model_name != "deterministic-local"
     effective_model = get_settings().llm_model if use_llm else "deterministic-local"
@@ -96,6 +97,8 @@ def run_strategy_agent(
                 "sample_size": sample_size,
                 "sample_criteria": sample_criteria,
                 "baseline_recommendations": fallback_rows,
+                "document_context": document_context or "",
+                "document_context_used": bool(document_context),
             },
         )
         if llm_result.used and isinstance(llm_payload, dict):
@@ -163,6 +166,7 @@ def run_interpretation_agent(
     random_state: int,
     model_name: str,
     tracer: TraceCollector,
+    document_context: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, AgentRunMeta]:
     use_llm = llm_ready() and model_name != "deterministic-local"
     effective_model = get_settings().llm_model if use_llm else "deterministic-local"
@@ -192,7 +196,11 @@ def run_interpretation_agent(
         if int(cluster["cluster_label"]) != -1
     ]
     llm_targets = _prioritize_clusters_for_llm(cluster_frames)
-    llm_by_cluster = _llm_cluster_interpretations(llm_targets, samples) if use_llm else {}
+    llm_by_cluster = (
+        _llm_cluster_interpretations(llm_targets, samples, document_context=document_context)
+        if use_llm
+        else {}
+    )
     if llm_by_cluster:
         llm_used = True
         llm_mode = "llm_active"
@@ -308,6 +316,7 @@ def _prioritize_clusters_for_llm(
 def _llm_cluster_interpretations(
     cluster_frames: list[pd.Series],
     samples: pd.DataFrame,
+    document_context: str | None = None,
 ) -> dict[int, dict[str, str]]:
     if not cluster_frames:
         return {}
@@ -332,7 +341,11 @@ def _llm_cluster_interpretations(
             )
         llm_result, llm_payload = complete_json_with_llm(
             system_prompt=INTERPRETATION_SYSTEM_PROMPT,
-            user_payload={"clusters": payload_clusters},
+            user_payload={
+                "clusters": payload_clusters,
+                "document_context": document_context or "",
+                "document_context_used": bool(document_context),
+            },
         )
         if not llm_result.used or not isinstance(llm_payload, dict):
             continue
