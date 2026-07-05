@@ -53,6 +53,47 @@ def load_pipeline_config(path: Path | str | None = None) -> dict[str, Any]:
     return merged
 
 
+def merge_pipeline_config(
+    base: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fusiona config por defecto/archivo con overrides de la API."""
+    merged = json.loads(json.dumps(base or load_pipeline_config()))
+    if not overrides:
+        return merged
+
+    if overrides.get("umap_n_neighbors") is not None:
+        merged.setdefault("umap", {})["n_neighbors"] = int(overrides["umap_n_neighbors"])
+    if overrides.get("umap_min_dist") is not None:
+        merged.setdefault("umap", {})["min_dist"] = float(overrides["umap_min_dist"])
+    if overrides.get("hdbscan_min_cluster_size") is not None:
+        merged.setdefault("hdbscan", {})["min_cluster_size"] = int(
+            overrides["hdbscan_min_cluster_size"]
+        )
+    if overrides.get("hdbscan_min_samples") is not None:
+        merged.setdefault("hdbscan", {})["min_samples"] = int(overrides["hdbscan_min_samples"])
+    if overrides.get("dbscan_eps") is not None:
+        merged.setdefault("dbscan", {})["eps"] = float(overrides["dbscan_eps"])
+    return merged
+
+
+def tuning_overrides_from_body(body: Any) -> dict[str, Any]:
+    """Extrae overrides opcionales de RunCreateBody / ProjectRunCreateBody."""
+    fields = (
+        "umap_n_neighbors",
+        "umap_min_dist",
+        "hdbscan_min_cluster_size",
+        "hdbscan_min_samples",
+        "dbscan_eps",
+    )
+    overrides: dict[str, Any] = {}
+    for field in fields:
+        value = getattr(body, field, None)
+        if value is not None:
+            overrides[field] = value
+    return overrides
+
+
 def save_pipeline_config(data: dict[str, Any], path: Path | str | None = None) -> Path:
     out = config_path(path)
     out.parent.mkdir(parents=True, exist_ok=True)

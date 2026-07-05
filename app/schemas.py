@@ -77,6 +77,15 @@ class PipelineMetrics(BaseModel):
     cluster_stability: float | None = None
     trustworthiness: float | None = None
     pca_variance_explained: float | None = None
+    pipeline_tuning_applied: dict[str, float | int] | None = None
+
+
+class PipelineTuningFields(BaseModel):
+    umap_n_neighbors: int | None = Field(default=None, ge=2, le=200)
+    umap_min_dist: float | None = Field(default=None, ge=0.0, le=0.99)
+    hdbscan_min_cluster_size: int | None = Field(default=None, ge=2, le=5000)
+    hdbscan_min_samples: int | None = Field(default=None, ge=1, le=1000)
+    dbscan_eps: float | None = Field(default=None, ge=0.001, le=10.0)
 
 
 class PipelineResult(BaseModel):
@@ -104,7 +113,7 @@ class DatasetProfileResponse(BaseModel):
     all_columns: list[str]
 
 
-class RunCreateBody(BaseModel):
+class RunCreateBody(PipelineTuningFields):
     """Cuerpo JSON aceptado por el endpoint (snake_case y alias)."""
 
     modality: Modality = "it_ops"
@@ -150,6 +159,10 @@ class ProjectSourceSummary(BaseModel):
     all_columns: list[str] = Field(default_factory=list)
     numeric_columns: list[str] = Field(default_factory=list)
     categorical_columns: list[str] = Field(default_factory=list)
+    relationship_status: str | None = None
+    relationship_score: float | None = None
+    relationship_reason: str | None = None
+    content_summary: str | None = None
 
 
 class ProjectSummary(BaseModel):
@@ -181,7 +194,7 @@ class ProjectSourceUploadJobResponse(BaseModel):
     project: ProjectDetail | None = None
 
 
-class ProjectRunCreateBody(BaseModel):
+class ProjectRunCreateBody(PipelineTuningFields):
     reduction_method: ReductionMethod = "UMAP"
     seed: int | None = None
     n_samples: int | None = Field(default=None, ge=30, le=10_000)
@@ -205,6 +218,7 @@ class RunSummary(BaseModel):
     source_type: str | None = None
     source_id: str | None = None
     source_name: str | None = None
+    dataset_id: str | None = None
 
 
 class RunDetail(RunSummary):
@@ -270,6 +284,7 @@ class ChatResponse(BaseModel):
     llm_used: bool = False
     llm_mode: str = "rules"
     llm_detail: str | None = None
+    document_context_used: bool = False
 
 
 class ChatSuggestionsResponse(BaseModel):
@@ -424,6 +439,7 @@ class AgentServiceResponse(BaseModel):
     llm_mode: str = "rules"
     llm_detail: str | None = None
     model_name: str = "deterministic-local"
+    document_context_used: bool = False
 
 
 class AgentTraceResponse(BaseModel):

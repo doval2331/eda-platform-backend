@@ -370,6 +370,63 @@ def _load_bi_frames(run_id: str | None = None) -> dict[str, pd.DataFrame]:
         ),
     }
 
+    if frames["bi_sla_by_category"].empty and not frames["bi_evidences"].empty:
+        frames["bi_sla_by_category"] = _read_duckdb(
+            f"""
+            SELECT
+                run_id,
+                'Cluster ' || CAST(cluster_label AS VARCHAR) AS category,
+                CAST(COUNT(*) AS INTEGER) AS evidence_count,
+                CAST(SUM(CASE WHEN COALESCE(sla_incumplido, sla_breached) THEN 1 ELSE 0 END) AS INTEGER)
+                    AS sla_breached_count,
+                AVG(
+                    COALESCE(
+                        sla_breach_rate,
+                        CASE
+                            WHEN sla_incumplido IS NULL THEN NULL
+                            WHEN sla_incumplido THEN 1.0
+                            ELSE 0.0
+                        END
+                    )
+                ) AS avg_sla_breach_rate,
+                AVG(COALESCE(tiempo_resolucion_horas, avg_resolution_hours)) AS avg_resolution_hours,
+                AVG(operational_risk_score) AS avg_risk
+            FROM run_evidences
+            {evidence_where}
+            GROUP BY run_id, cluster_label
+            """,
+            evidence_params,
+        )
+
+    if frames["bi_service_risk"].empty and not frames["bi_evidences"].empty:
+        frames["bi_service_risk"] = _read_duckdb(
+            f"""
+            SELECT
+                run_id,
+                'Cluster ' || CAST(cluster_label AS VARCHAR) AS affected_service,
+                CAST(COUNT(*) AS INTEGER) AS evidence_count,
+                AVG(
+                    COALESCE(
+                        sla_breach_rate,
+                        CASE
+                            WHEN sla_incumplido IS NULL THEN NULL
+                            WHEN sla_incumplido THEN 1.0
+                            ELSE 0.0
+                        END
+                    )
+                ) AS avg_sla_breach_rate,
+                AVG(COALESCE(tiempo_resolucion_horas, avg_resolution_hours)) AS avg_resolution_hours,
+                AVG(operational_risk_score) AS avg_risk,
+                AVG(business_impact_score) AS avg_business_impact,
+                SUM(security_incidents) AS total_security_incidents,
+                SUM(downtime_hours) AS total_downtime_hours
+            FROM run_evidences
+            {evidence_where}
+            GROUP BY run_id, cluster_label
+            """,
+            evidence_params,
+        )
+
     selected_where, selected_params = _run_filter("run_id", run_id)
     selected = _read_duckdb(
         f"""
