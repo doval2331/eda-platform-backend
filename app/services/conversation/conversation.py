@@ -1784,6 +1784,7 @@ def build_chat_response(
     *,
     run_context: dict | None = None,
     history: list[dict[str, str]] | None = None,
+    document_context: str | None = None,
 ) -> ChatResponse:
     df = load_run_evidences(run_id)
     if df.empty:
@@ -1973,6 +1974,7 @@ def build_chat_response(
         tool_summaries=tool_summaries,
         fallback_answer=fallback_answer,
         conversation_history=history,
+        document_context=document_context,
     )
 
     return ChatResponse(
@@ -1982,4 +1984,5 @@ def build_chat_response(
         llm_used=llm_result.used,
         llm_mode=llm_result.mode,
         llm_detail=llm_result.detail,
+        document_context_used=bool(document_context),
     )

@@ -7,6 +7,7 @@ from typing import Annotated
 
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import HTMLResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -53,6 +54,11 @@ from app.schemas import (
     RunSummary,
 )
 from app.services.datasets.dataset_store import get_dataset_meta, save_upload, uploads_dir
+from app.services.datasets.dataset_profile import (
+    build_dataset_explore_profile,
+    build_dataset_full_profile,
+    build_dataset_profile_html,
+)
 from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
 from app.services.conversation.chat_history import load_history, persist_exchange, persist_note
 from app.services.runs.duckdb_store import (
@@ -85,6 +91,7 @@ from app.services.bi.metabase_dashboard import (
     get_conversation_dashboard_links,
 )
 from app.services.pipeline.pipeline import run_pipeline
+from app.services.pipeline.pipeline_config import tuning_overrides_from_body
 from app.services.projects.project_service import (
     add_project_source,
     add_project_source_from_path,
@@ -100,6 +107,10 @@ from app.services.projects.project_service import (
     update_project,
 )
 from app.services.projects.project_validation import validate_project_before_run
+from app.services.projects.source_relationship import (
+    build_project_document_context,
+    validate_project_text_sources,
+)
 
 router = APIRouter()
 
@@ -192,6 +203,17 @@ def _process_project_source_upload_job(job_id: str) -> None:
             filename=str(job["filename"]),
             path=temp_path,
         )
+        if str(job["source_type"]) in {"dictionary", "notes", "other"}:
+            validate_project_text_sources(
+                db,
+                project_id=str(job["project_id"]),
+                user_id=str(job["user_id"]),
+            )
+            detail = get_project_detail(
+                db,
+                project_id=str(job["project_id"]),
+                user_id=str(job["user_id"]),
+            )
         _set_upload_job(
             job_id,
             status="completed",
@@ -265,6 +287,20 @@ def _materialize_run_in_duckdb(row: AnalysisRun) -> None:
         persist_run_detail(run_to_detail(row))
 
 
+def _document_context_for_run(
+    db: Session,
+    row: AnalysisRun,
+    user_id: str,
+) -> tuple[str, bool]:
+    if not row.project_id:
+        return "", False
+    return build_project_document_context(
+        db,
+        project_id=row.project_id,
+        user_id=user_id,
+    )
+
+
 def _run_summary_from_row(row: AnalysisRun) -> RunSummary:
     return RunSummary(
         id=row.id,
@@ -280,6 +316,7 @@ def _run_summary_from_row(row: AnalysisRun) -> RunSummary:
         source_type=row.source_type,
         source_id=row.source_id,
         source_name=row.source_name,
+        dataset_id=row.dataset_id,
     )
 
 
@@ -301,6 +338,7 @@ def _execute_and_persist_run(
     source_type: str | None = None,
     source_id: str | None = None,
     source_name: str | None = None,
+    pipeline_overrides: dict | None = None,
 ) -> RunDetail:
     settings = get_settings()
     result = run_pipeline(
@@ -315,6 +353,7 @@ def _execute_and_persist_run(
         exclude_columns=exclude_columns or None,
         numeric_columns=numeric_columns,
         categorical_columns=categorical_columns,
+        pipeline_overrides=pipeline_overrides,
     )
     analyzed_rows = (
         len(result.metadata)
@@ -332,6 +371,7 @@ def _execute_and_persist_run(
         "source_type": source_type,
         "source_id": source_id,
         "source_name": source_name,
+        "dataset_id": dataset_id,
     }
     row = save_run(db, payload=payload)
     detail = run_to_detail(row)
@@ -385,6 +425,51 @@ def get_dataset_profile(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return DatasetProfileResponse(**meta)
+
+
+@router.get("/api/datasets/{dataset_id}/explore-profile")
+def get_dataset_explore_profile(
+    dataset_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        return build_dataset_explore_profile(dataset_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Dataset no encontrado") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/api/datasets/{dataset_id}/full-profile")
+def get_dataset_full_profile(
+    dataset_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        return build_dataset_full_profile(dataset_id, user_id=user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Dataset no encontrado") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.get("/api/datasets/{dataset_id}/profile-report", response_class=HTMLResponse)
+def get_dataset_profile_report(
+    dataset_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        html = build_dataset_profile_html(dataset_id, user_id=user.id)
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="ydata-profiling no está instalado en el servidor.",
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Dataset no encontrado") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return HTMLResponse(content=html)
 
 
 @router.post("/api/projects", response_model=ProjectDetail, status_code=201)
@@ -567,6 +652,24 @@ def remove_project_source(
     return ProjectDetail(**detail)
 
 
+@router.post("/api/projects/{project_id}/validate-sources", response_model=ProjectDetail)
+def validate_project_sources(
+    project_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    try:
+        get_project_or_404(db, project_id=project_id, user_id=user.id)
+        validate_project_text_sources(db, project_id=project_id, user_id=user.id)
+        return ProjectDetail(
+            **get_project_detail(db, project_id=project_id, user_id=user.id),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 @router.post("/api/projects/{project_id}/runs", response_model=ProjectRunResponse, status_code=201)
 def create_project_runs(
     project_id: str,
@@ -576,6 +679,7 @@ def create_project_runs(
 ):
     settings = get_settings()
     seed = body.seed if body.seed is not None else settings.default_seed
+    pipeline_overrides = tuning_overrides_from_body(body) or None
 
     try:
         project = get_project_or_404(db, project_id=project_id, user_id=user.id)
@@ -640,6 +744,7 @@ def create_project_runs(
                 source_type="merged",
                 source_id=None,
                 source_name="Todas las fuentes (unificado)",
+                pipeline_overrides=pipeline_overrides,
             )
             runs.append(run_detail)
         for source in targets:
@@ -660,6 +765,7 @@ def create_project_runs(
                 source_type=source.source_type,
                 source_id=source.id,
                 source_name=source_display_name(source),
+                pipeline_overrides=pipeline_overrides,
             )
             runs.append(run_detail)
     except ValueError as exc:
@@ -687,6 +793,7 @@ def create_run(
 ):
     settings = get_settings()
     seed = body.seed if body.seed is not None else settings.default_seed
+    pipeline_overrides = tuning_overrides_from_body(body) or None
 
     if body.modality == "tabular" and not body.dataset_id:
         raise HTTPException(
@@ -709,6 +816,7 @@ def create_run(
             categorical_columns=body.categorical_columns,
             project_name=body.project_name,
             source_type=body.source_type or ("incidents" if body.modality == "tabular" else None),
+            pipeline_overrides=pipeline_overrides,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -782,6 +890,7 @@ def chat_with_run(
             "sources": project_sources,
         },
         history=[item.model_dump() for item in body.history[-8:]],
+        document_context=_document_context_for_run(db, row, user.id)[0],
     )
     persist_exchange(
         run_id=run_id,
@@ -859,13 +968,14 @@ def run_strategy_agent_for_run(
     run_id: str,
     body: AgentStrategyRequest,
     db: Annotated[Session, Depends(get_db)],
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
 ):
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
     evidences = load_run_evidences(run_id)
     if evidences.empty:
         raise HTTPException(status_code=422, detail="No hay evidencias materializadas para la corrida")
+    document_context, document_used = _document_context_for_run(db, row, user.id)
     tracer = TraceCollector(run_id=run_id)
     recommendations, meta = run_strategy_agent(
         run_id=run_id,
@@ -875,6 +985,7 @@ def run_strategy_agent_for_run(
         sample_criteria=body.sample_criteria,
         model_name=body.model_name,
         tracer=tracer,
+        document_context=document_context or None,
     )
     traces = tracer.to_frame()
     save_agent_recommendations(run_id, recommendations)
@@ -888,6 +999,7 @@ def run_strategy_agent_for_run(
         llm_mode=meta.llm_mode,
         llm_detail=meta.llm_detail,
         model_name=meta.model_name,
+        document_context_used=document_used,
     )
 
 
@@ -896,13 +1008,14 @@ def run_interpretation_agent_for_run(
     run_id: str,
     body: AgentInterpretationRequest,
     db: Annotated[Session, Depends(get_db)],
-    _user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(get_current_user)],
 ):
     row = _get_run_or_404(db, run_id)
     _materialize_run_in_duckdb(row)
     evidences = load_run_evidences(run_id)
     if evidences.empty:
         raise HTTPException(status_code=422, detail="No hay evidencias materializadas para la corrida")
+    document_context, document_used = _document_context_for_run(db, row, user.id)
     tracer = TraceCollector(run_id=run_id)
     samples, insights, meta = run_interpretation_agent(
         run_id=run_id,
@@ -912,6 +1025,7 @@ def run_interpretation_agent_for_run(
         random_state=body.random_state,
         model_name=body.model_name,
         tracer=tracer,
+        document_context=document_context or None,
     )
     traces = tracer.to_frame()
     save_agent_cluster_samples(run_id, samples)
@@ -926,6 +1040,7 @@ def run_interpretation_agent_for_run(
         llm_mode=meta.llm_mode,
         llm_detail=meta.llm_detail,
         model_name=meta.model_name,
+        document_context_used=document_used,
     )
 
 
