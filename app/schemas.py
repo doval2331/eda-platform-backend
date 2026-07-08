@@ -458,6 +458,10 @@ class ConversationSuggestedQuestionGroups(BaseModel):
 
 
 class ConversationDashboardSpec(BaseModel):
+    schema_version: str = "conversation-dashboard/v1"
+    contract_status: str = "valid"
+    contract_warnings: list[str] = Field(default_factory=list)
+    llm_risk_flags: list[str] = Field(default_factory=list)
     executive_summary: ConversationExecutiveSummary = Field(default_factory=ConversationExecutiveSummary)
     semantic_variables: list[ConversationSemanticVariable] = Field(default_factory=list)
     priority_findings: list[ConversationPriorityFinding] = Field(default_factory=list)
@@ -543,6 +547,7 @@ class ConversationChartValidation(BaseModel):
 
 
 class ConversationChartDataResponse(BaseModel):
+    schema_version: str = "conversation-chart-data/v1"
     run_id: str
     visualization_id: str = ""
     title: str = ""

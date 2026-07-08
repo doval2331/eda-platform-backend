@@ -126,6 +126,7 @@ VALID_ACTION_TYPES = {"chart", "chat", "conclusion"}
 VALID_VARIABLE_ROLES = {"business", "metric", "technical", "identifier", "unknown"}
 VALID_CONFIDENCE = {"alta", "media", "baja"}
 VALID_EVIDENCE_SOURCES = {"dataset", "pipeline", "cluster", "insight", "llm", "user"}
+DASHBOARD_SPEC_SCHEMA_VERSION = "conversation-dashboard/v1"
 
 SEMANTIC_VARIABLES: dict[str, dict[str, Any]] = {
     "affected_service": {
@@ -319,11 +320,11 @@ def build_dashboard_spec(
         spec.llm_used = True
         spec.llm_mode = llm_result.mode
         spec.llm_detail = llm_result.detail
-        return spec
+        return _refresh_dashboard_contract(spec)
     fallback.llm_used = False
     fallback.llm_mode = llm_result.mode
     fallback.llm_detail = llm_result.detail
-    return fallback
+    return _refresh_dashboard_contract(fallback)
 
 
 def build_dashboard_context(
@@ -632,8 +633,8 @@ def _fallback_spec(context: dict[str, Any], insights: list[dict[str, Any]]) -> C
     visualizations = _fallback_visualizations(context, findings)
     active_id = visualizations[0]["id"] if visualizations else ""
     conclusions = _fallback_conclusions(findings, visualizations)
-    spec = ConversationDashboardSpec.model_validate(
-        {
+    payload = {
+            "schema_version": DASHBOARD_SPEC_SCHEMA_VERSION,
             "executive_summary": {
                 "title": "Resumen ejecutivo",
                 "dataset_name": str(dataset.get("dataset_name") or dataset.get("source_name") or "Analisis actual"),
@@ -670,7 +671,9 @@ def _fallback_spec(context: dict[str, Any], insights: list[dict[str, Any]]) -> C
             "llm_mode": "rules",
             "llm_detail": "Especificacion generada por reglas locales.",
         }
-    )
+    payload = _normalize_dashboard_payload(payload, payload)
+    payload = _apply_dashboard_contract_metadata(payload)
+    spec = ConversationDashboardSpec.model_validate(payload)
     return spec
 
 
@@ -958,6 +961,7 @@ def _fallback_evidence_line(
 def _sanitize_llm_spec(raw: dict[str, Any], fallback: ConversationDashboardSpec) -> ConversationDashboardSpec:
     fallback_payload = fallback.model_dump()
     payload = {
+        "schema_version": DASHBOARD_SPEC_SCHEMA_VERSION,
         "executive_summary": _merge_dict(
             fallback_payload["executive_summary"],
             _dict_value(raw.get("executive_summary")),
@@ -985,7 +989,110 @@ def _sanitize_llm_spec(raw: dict[str, Any], fallback: ConversationDashboardSpec)
     if not payload["active_chart_default"].get("visualization_id") and payload["suggested_visualizations"]:
         payload["active_chart_default"]["visualization_id"] = payload["suggested_visualizations"][0]["id"]
     payload = _normalize_dashboard_payload(payload, fallback_payload)
+    payload = _apply_dashboard_contract_metadata(payload)
     return ConversationDashboardSpec.model_validate(payload)
+
+
+def _refresh_dashboard_contract(spec: ConversationDashboardSpec) -> ConversationDashboardSpec:
+    payload = spec.model_dump()
+    payload = _apply_dashboard_contract_metadata(payload)
+    return ConversationDashboardSpec.model_validate(payload)
+
+
+def _apply_dashboard_contract_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    warnings, risk_flags = _dashboard_contract_findings(payload)
+    payload["schema_version"] = DASHBOARD_SPEC_SCHEMA_VERSION
+    payload["contract_warnings"] = warnings
+    payload["llm_risk_flags"] = risk_flags
+    blocking_flags = {"missing_variable", "invalid_chart_type", "unlinked_chart", "requires_data"}
+    payload["contract_status"] = "warning" if blocking_flags.intersection(risk_flags) else "valid"
+    return payload
+
+
+def _dashboard_contract_findings(payload: dict[str, Any]) -> tuple[list[str], list[str]]:
+    semantic_items = payload.get("semantic_variables") or []
+    semantic_map = {str(item.get("name")): item for item in semantic_items if item.get("name")}
+    visualizations = payload.get("suggested_visualizations") or []
+    visual_ids = {str(item.get("id")) for item in visualizations if item.get("id")}
+    warnings: list[str] = []
+    risk_flags: list[str] = []
+
+    if payload.get("llm_used"):
+        risk_flags.append("llm_generated")
+
+    for visualization in visualizations:
+        viz_id = str(visualization.get("id") or visualization.get("title") or "visualizacion")
+        chart_type = str(visualization.get("chart_type") or "").lower()
+        if chart_type not in VALID_CHART_TYPES:
+            warnings.append(f"{viz_id}: tipo de grafico no soportado '{chart_type or 'vacio'}'.")
+            risk_flags.append("invalid_chart_type")
+
+        dimension = str(visualization.get("x") or visualization.get("group_by") or "").strip()
+        metric = str(visualization.get("metric") or visualization.get("y") or "count").strip()
+        if not dimension:
+            warnings.append(f"{viz_id}: falta una dimension para graficar.")
+            risk_flags.append("requires_data")
+        else:
+            _append_variable_contract_findings(
+                warnings,
+                risk_flags,
+                semantic_map,
+                variable=dimension,
+                owner=viz_id,
+                usage="dimension",
+            )
+
+        if metric and _column_key(metric) not in {"count", "conteo", "cantidad", "tickets", "incidencias", "registros"}:
+            _append_variable_contract_findings(
+                warnings,
+                risk_flags,
+                semantic_map,
+                variable=metric,
+                owner=viz_id,
+                usage="metrica",
+            )
+
+    for recommendation in payload.get("agent_recommendations") or []:
+        if str(recommendation.get("action_type") or "").lower() != "chart":
+            continue
+        linked_id = str(recommendation.get("linked_visualization_id") or "")
+        if linked_id not in visual_ids:
+            rec_id = str(recommendation.get("id") or recommendation.get("title") or "recomendacion")
+            warnings.append(f"{rec_id}: recomendacion marcada como grafico sin visualizacion valida.")
+            risk_flags.append("unlinked_chart")
+
+    for conclusion in payload.get("conclusions") or []:
+        related_chart = str(conclusion.get("related_chart") or "")
+        if related_chart and related_chart not in visual_ids:
+            conclusion_id = str(conclusion.get("id") or "conclusion")
+            warnings.append(f"{conclusion_id}: referencia un grafico que no existe en la especificacion.")
+            risk_flags.append("unlinked_chart")
+        if not str(conclusion.get("evidence") or "").strip():
+            risk_flags.append("low_evidence")
+
+    return _unique(warnings)[:12], _unique(risk_flags)[:12]
+
+
+def _append_variable_contract_findings(
+    warnings: list[str],
+    risk_flags: list[str],
+    semantic_map: dict[str, dict[str, Any]],
+    *,
+    variable: str,
+    owner: str,
+    usage: str,
+) -> None:
+    if not variable or _column_key(variable) in {"count", "conteo", "cantidad", "tickets", "incidencias", "registros"}:
+        return
+    semantic = semantic_map.get(variable)
+    if not semantic:
+        warnings.append(f"{owner}: la {usage} '{variable}' no existe en el diccionario semantico del run.")
+        risk_flags.append("missing_variable")
+        return
+    role = str(semantic.get("role") or "").lower()
+    if role in {"technical", "identifier"} or (usage == "metrica" and semantic.get("avoid_as_metric")):
+        warnings.append(f"{owner}: usa '{variable}' como {usage}, pero es una variable tecnica o identificador.")
+        risk_flags.append("technical_variable")
 
 
 def _normalize_dashboard_payload(payload: dict[str, Any], fallback_payload: dict[str, Any]) -> dict[str, Any]:
