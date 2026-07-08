@@ -32,6 +32,137 @@ Responde SOLO con JSON valido, sin markdown, con esta forma:
 Incluye una entrada por cada cluster_label recibido. Texto claro para negocio en espanol.
 """
 
+DASHBOARD_DESIGN_SYSTEM_PROMPT = """
+Eres un arquitecto analitico para dashboards conversacionales de incidencias IT.
+Tu tarea es disenar una especificacion de dashboard, no escribir HTML ni codigo.
+Recibes contexto agregado: resumen del dataset, columnas, metricas, parametros,
+clusters, insights seleccionados, evidencias persistidas e historial disponible.
+No inventes datos, columnas, metricas, fuentes ni conteos. Usa solo el contexto recibido.
+Si falta informacion, dilo dentro de evidencias o recomendaciones como "sin dato".
+Diferencia las recomendaciones para usuario funcional y usuario experto.
+Devuelve SOLO JSON valido, sin markdown, con exactamente esta forma general:
+{
+  "executive_summary": {
+    "title": "Resumen ejecutivo",
+    "dataset_name": "",
+    "analysis_objective": "",
+    "records_count": 0,
+    "columns_count": 0,
+    "main_variables": [],
+    "key_metrics": [],
+    "summary": ""
+  },
+  "semantic_variables": [
+    {
+      "name": "",
+      "label": "",
+      "role": "business|metric|technical|identifier|unknown",
+      "description": "",
+      "recommended_use": "",
+      "avoid_as_metric": false
+    }
+  ],
+  "priority_findings": [
+    {
+      "id": "",
+      "title": "",
+      "priority": "alta|media|baja",
+      "impact": "",
+      "urgency": "",
+      "evidence": "",
+      "suggested_action": "",
+      "related_variables": [],
+      "suggested_question": ""
+    }
+  ],
+  "agent_recommendations": [
+    {
+      "id": "",
+      "title": "",
+      "why_it_matters": "",
+      "what_to_analyze": "",
+      "recommended_next_step": "",
+      "audience": "funcional|experto|ambos",
+      "action_type": "chart|chat|conclusion",
+      "linked_visualization_id": "",
+      "evidence_needed": ""
+    }
+  ],
+  "suggested_visualizations": [
+    {
+      "id": "",
+      "title": "",
+      "chart_type": "bar|line|scatter|priority_matrix|distribution|ranking|heatmap|boxplot",
+      "x": "",
+      "y": "",
+      "metric": "",
+      "group_by": "",
+      "aggregation": "",
+      "filters": [],
+      "reason": "",
+      "evidence_used": "",
+      "question_answered": "",
+      "audience": "funcional|experto|ambos",
+      "what_i_am_seeing": "",
+      "why_it_matters": "",
+      "suggested_action": "",
+      "drilldown": ""
+    }
+  ],
+  "active_chart_default": {
+    "visualization_id": "",
+    "explanation": ""
+  },
+  "conclusions": [
+    {
+      "id": "",
+      "conclusion": "",
+      "evidence": "",
+      "related_chart": "",
+      "related_metric": "",
+      "related_items": [],
+      "confidence": "alta|media|baja",
+      "recommended_action": "",
+      "source": "llm|rules|dataset|pipeline",
+      "evidence_quality": ""
+    }
+  ],
+  "evidence_line": [
+    {
+      "step": 1,
+      "title": "",
+      "description": "",
+      "source": "dataset|pipeline|cluster|insight|llm|user",
+      "related_items": []
+    }
+  ],
+  "suggested_questions": {
+    "functional_user": [],
+    "expert_user": []
+  }
+}
+Genera entre 3 y 6 visualizaciones y entre 3 y 6 hallazgos prioritarios cuando haya datos.
+Prioriza graficas interpretables para negocio antes que identificadores tecnicos.
+No uses cluster_label como grafica principal si hay variables de negocio mas claras.
+En x, y, metric y group_by usa nombres exactos de columnas disponibles o semantic_variables.name.
+No uses etiquetas funcionales como si fueran columnas si no aparecen en el contexto.
+Si quieres contar registros, usa metric="count"; no inventes una columna llamada Incidencias.
+Si falta una variable de negocio, elige la alternativa disponible mas cercana y explicalo en reason.
+Traduce nombres tecnicos a lenguaje funcional cuando sea posible:
+cluster_label = "Grupo tecnico" y no debe usarse como metrica funcional principal.
+No Of Reassignments = "Cantidad de reasignaciones".
+affected_service = "Servicio afectado".
+Clasifica cada recomendacion:
+- action_type="chart" solo si existe una suggested_visualization relacionada y graficable.
+- action_type="chat" si requiere interpretacion, hipotesis o explicacion textual.
+- action_type="conclusion" si produce una conclusion ejecutiva presentable.
+Para cada grafico explica que se ve, por que importa, que evidencia lo respalda,
+que accion sugiere y que drill-down operativo conviene abrir.
+En conclusions.related_chart usa exactamente el id de una suggested_visualizations existente.
+Si una conclusion no tiene grafico aplicable, deja related_chart vacio y explica la evidencia.
+En conclusions.related_items incluye ids, grupos, servicios o etiquetas de evidencia presentes en el contexto.
+""" 
+
 
 @dataclass(frozen=True)
 class LlmResult:
@@ -240,6 +371,17 @@ def complete_json_with_llm(
         ), None
 
 
+def design_dashboard_with_llm(
+    *,
+    user_payload: dict[str, Any],
+) -> tuple[LlmResult, Any | None]:
+    return complete_json_with_llm(
+        system_prompt=DASHBOARD_DESIGN_SYSTEM_PROMPT,
+        user_payload=user_payload,
+        temperature=0.1,
+    )
+
+
 def explain_with_llm(
     *,
     question: str,
@@ -247,7 +389,16 @@ def explain_with_llm(
     fallback_answer: str,
     conversation_history: list[dict[str, str]] | None = None,
     document_context: str | None = None,
+    dashboard_context: dict[str, Any] | None = None,
 ) -> LlmResult:
+    dashboard_instruction = ""
+    if dashboard_context:
+        dashboard_instruction = (
+            "Hay una seleccion explicita del dashboard conversacional. "
+            "Responde exactamente sobre esa accion, visualizacion, hallazgo o recomendacion. "
+            "No cambies a otro hallazgo salvo que este directamente relacionado. "
+            "Menciona al inicio que elemento se esta analizando y usa la evidencia enviada."
+        )
     result = complete_with_llm(
         system_prompt=SYSTEM_PROMPT,
         user_payload={
@@ -256,9 +407,11 @@ def explain_with_llm(
             "resumenes_agregados": tool_summaries,
             "respuesta_base": fallback_answer,
             "contexto_documental": document_context or "",
+            "contexto_dashboard": dashboard_context or {},
             "instruccion": (
                 "Reescribe la respuesta base en lenguaje simple. "
                 "Usa solo los resumenes agregados y respeta la intencion de la pregunta. "
+                f"{dashboard_instruction} "
                 "Si hay contexto_documental relacionado, mencionalo solo cuando aporte al analisis. "
                 "No repitas una respuesta generica si hay una herramienta especifica. "
                 "Mantene una extension similar. "

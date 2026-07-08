@@ -3,13 +3,13 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.api.deps import get_current_user
 from app.config import get_settings
@@ -28,6 +28,8 @@ from app.schemas import (
     ChatHistoryResponse,
     ChatMessageRecord,
     ChatSuggestionsResponse,
+    ConversationChartDataRequest,
+    ConversationChartDataResponse,
     ConversationDashboardResponse,
     DatasetProfileResponse,
     HealthResponse,
@@ -52,6 +54,7 @@ from app.schemas import (
     RunDetail,
     RunResetResponse,
     RunSummary,
+    SelectedInsightsResponse,
 )
 from app.services.datasets.dataset_store import get_dataset_meta, save_upload, uploads_dir
 from app.services.datasets.dataset_profile import (
@@ -60,6 +63,14 @@ from app.services.datasets.dataset_profile import (
     build_dataset_profile_html,
 )
 from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
+from app.services.conversation.chart_data import build_conversation_chart_data
+from app.services.conversation.dashboard_spec import SEMANTIC_VARIABLES, build_dashboard_spec
+from app.services.conversation.semantic_dictionary import (
+    get_semantic_dictionary,
+    reload_semantic_dictionary,
+    save_configured_semantic_variables,
+    semantic_dictionary_path,
+)
 from app.services.conversation.chat_history import load_history, persist_exchange, persist_note
 from app.services.runs.duckdb_store import (
     append_agent_decisions,
@@ -275,6 +286,19 @@ def _metrics_from_row(row: AnalysisRun) -> PipelineMetrics:
     return PipelineMetrics.model_validate(_metrics_from_payload(row))
 
 
+def _metrics_from_summary_row(row: AnalysisRun) -> PipelineMetrics:
+    metrics: dict = {}
+    if row.silhouette is not None:
+        metrics["silhouette"] = float(row.silhouette)
+    if row.davies_bouldin is not None:
+        metrics["davies_bouldin"] = float(row.davies_bouldin)
+    if row.n_clusters is not None:
+        metrics["n_clusters"] = row.n_clusters
+    if row.noise_pct is not None:
+        metrics["noise_pct"] = row.noise_pct
+    return PipelineMetrics.model_validate(metrics)
+
+
 def _get_run_or_404(db: Session, run_id: str) -> AnalysisRun:
     row = db.get(AnalysisRun, run_id)
     if row is None:
@@ -310,7 +334,7 @@ def _run_summary_from_row(row: AnalysisRun) -> RunSummary:
         seed=row.seed,
         n_samples=row.n_samples,
         outliers_count=row.outliers_count,
-        metrics=_metrics_from_row(row),
+        metrics=_metrics_from_summary_row(row),
         project_id=row.project_id,
         project_name=row.project_name,
         source_type=row.source_type,
@@ -853,6 +877,27 @@ def list_runs(
     limit = min(max(1, limit), 100)
     rows = (
         db.query(AnalysisRun)
+        .options(
+            load_only(
+                AnalysisRun.id,
+                AnalysisRun.created_at,
+                AnalysisRun.modality,
+                AnalysisRun.reduction_method,
+                AnalysisRun.seed,
+                AnalysisRun.n_samples,
+                AnalysisRun.outliers_count,
+                AnalysisRun.silhouette,
+                AnalysisRun.davies_bouldin,
+                AnalysisRun.n_clusters,
+                AnalysisRun.noise_pct,
+                AnalysisRun.project_id,
+                AnalysisRun.project_name,
+                AnalysisRun.source_type,
+                AnalysisRun.source_id,
+                AnalysisRun.source_name,
+                AnalysisRun.dataset_id,
+            )
+        )
         .order_by(AnalysisRun.created_at.desc())
         .limit(limit)
         .all()
@@ -895,7 +940,7 @@ def chat_with_run(
     persist_exchange(
         run_id=run_id,
         user_id=user.id,
-        question=body.question,
+        question=body.display_question or body.question,
         response=response,
     )
     return response
@@ -1183,6 +1228,18 @@ def select_run_insights_batch(
     return InsightBatchSelectionResponse(saved=saved)
 
 
+@router.get("/api/runs/{run_id}/insights/selected", response_model=SelectedInsightsResponse)
+def get_run_selected_insights(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    insights = list_selected_insights(run_id=run_id, user_id=user.id)
+    return SelectedInsightsResponse(total=len(insights), insights=insights)
+
+
 @router.get("/api/conversation-dashboard", response_model=ConversationDashboardResponse)
 def get_conversation_dashboard(
     db: Annotated[Session, Depends(get_db)],
@@ -1193,7 +1250,92 @@ def get_conversation_dashboard(
         row = _get_run_or_404(db, run_id)
         _materialize_run_in_duckdb(row)
     insights = list_selected_insights(run_id=run_id, user_id=user.id)
-    return ConversationDashboardResponse(total=len(insights), insights=insights)
+    dashboard_spec = build_dashboard_spec(
+        db=db,
+        user_id=user.id,
+        run_id=run_id,
+        insights=insights,
+    )
+    return ConversationDashboardResponse(
+        total=len(insights),
+        insights=insights,
+        dashboard_spec=dashboard_spec,
+    )
+
+
+@router.get("/api/conversation/semantic-dictionary")
+def get_conversation_semantic_dictionary(
+    _user: Annotated[User, Depends(get_current_user)],
+    refresh: bool = False,
+):
+    if refresh:
+        reload_semantic_dictionary()
+    dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES)
+    seen: set[tuple[str, str, str]] = set()
+    variables: list[dict[str, Any]] = []
+    for lookup_key, entry in sorted(dictionary.items()):
+        identity = (
+            str(entry.get("label") or lookup_key),
+            str(entry.get("role") or ""),
+            str(entry.get("description") or ""),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        variables.append(
+            {
+                "lookup_key": lookup_key,
+                "label": entry.get("label") or lookup_key,
+                "role": entry.get("role") or "unknown",
+                "semantic_type": entry.get("semantic_type") or "",
+                "can_chart": bool(entry.get("can_chart", True)),
+                "avoid_as_metric": bool(entry.get("avoid_as_metric", False)),
+                "description": entry.get("description") or "",
+                "recommended_use": entry.get("recommended_use") or "",
+                "aliases": entry.get("aliases") or [],
+            }
+        )
+    return {
+        "source": str(semantic_dictionary_path()),
+        "total": len(variables),
+        "variables": variables,
+    }
+
+
+@router.put("/api/conversation/semantic-dictionary")
+def update_conversation_semantic_dictionary(
+    _user: Annotated[User, Depends(get_current_user)],
+    payload: dict[str, Any] = Body(...),
+):
+    entries = payload.get("variables") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Se esperaba un arreglo 'variables'.")
+    result = save_configured_semantic_variables(entries)
+    return {
+        "source": result["path"],
+        "total": result["total"],
+        "variables": result["variables"],
+    }
+
+
+@router.post(
+    "/api/runs/{run_id}/conversation-chart-data",
+    response_model=ConversationChartDataResponse,
+)
+def get_run_conversation_chart_data(
+    run_id: str,
+    body: ConversationChartDataRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    return build_conversation_chart_data(
+        run_id=run_id,
+        visualization=body.visualization.model_dump(),
+        limit=body.limit,
+        evidence_limit=body.evidence_limit,
+    )
 
 
 @router.get("/api/metabase/status", response_model=MetabaseStatusResponse)

@@ -262,7 +262,8 @@ class ChatHistoryMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=1000)
+    question: str = Field(..., min_length=1, max_length=5000)
+    display_question: str | None = Field(default=None, max_length=1200)
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=8)
 
 
@@ -336,9 +337,227 @@ class SelectedInsightDashboardItem(InsightCandidate):
     avg_risk: float | None = None
 
 
+class SelectedInsightsResponse(BaseModel):
+    total: int
+    insights: list[SelectedInsightDashboardItem] = Field(default_factory=list)
+
+
+DashboardPriority = Literal["alta", "media", "baja"]
+DashboardAudience = Literal["funcional", "experto", "ambos"]
+DashboardRecommendationAction = Literal["chart", "chat", "conclusion"]
+DashboardVariableRole = Literal["business", "metric", "technical", "identifier", "unknown"]
+DashboardChartType = Literal[
+    "bar",
+    "line",
+    "scatter",
+    "priority_matrix",
+    "distribution",
+    "ranking",
+    "heatmap",
+    "boxplot",
+]
+DashboardConfidence = Literal["alta", "media", "baja"]
+DashboardEvidenceSource = Literal["dataset", "pipeline", "cluster", "insight", "llm", "user"]
+
+
+class ConversationExecutiveSummary(BaseModel):
+    title: str = "Resumen ejecutivo"
+    dataset_name: str = ""
+    analysis_objective: str = ""
+    records_count: int = 0
+    columns_count: int = 0
+    main_variables: list[str] = Field(default_factory=list)
+    key_metrics: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class ConversationSemanticVariable(BaseModel):
+    name: str
+    label: str = ""
+    role: DashboardVariableRole = "unknown"
+    description: str = ""
+    recommended_use: str = ""
+    avoid_as_metric: bool = False
+    can_chart: bool = True
+    semantic_type: str = ""
+
+
+class ConversationPriorityFinding(BaseModel):
+    id: str
+    title: str
+    priority: DashboardPriority = "media"
+    impact: str = ""
+    urgency: str = ""
+    evidence: str = ""
+    suggested_action: str = ""
+    related_variables: list[str] = Field(default_factory=list)
+    suggested_question: str = ""
+
+
+class ConversationAgentRecommendation(BaseModel):
+    id: str
+    title: str
+    why_it_matters: str = ""
+    what_to_analyze: str = ""
+    recommended_next_step: str = ""
+    audience: DashboardAudience = "ambos"
+    action_type: DashboardRecommendationAction = "chat"
+    linked_visualization_id: str = ""
+    evidence_needed: str = ""
+
+
+class ConversationSuggestedVisualization(BaseModel):
+    id: str
+    title: str
+    chart_type: DashboardChartType = "bar"
+    x: str = ""
+    y: str = ""
+    metric: str = ""
+    group_by: str = ""
+    aggregation: str = ""
+    filters: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+    evidence_used: str = ""
+    question_answered: str = ""
+    audience: DashboardAudience = "ambos"
+    what_i_am_seeing: str = ""
+    why_it_matters: str = ""
+    suggested_action: str = ""
+    drilldown: str = ""
+
+
+class ConversationActiveChartDefault(BaseModel):
+    visualization_id: str = ""
+    explanation: str = ""
+
+
+class ConversationDashboardConclusion(BaseModel):
+    id: str
+    conclusion: str
+    evidence: str = ""
+    related_chart: str = ""
+    related_metric: str = ""
+    related_items: list[str] = Field(default_factory=list)
+    confidence: DashboardConfidence = "media"
+    recommended_action: str = ""
+    source: str = ""
+    evidence_quality: str = ""
+
+
+class ConversationEvidenceLineStep(BaseModel):
+    step: int
+    title: str
+    description: str = ""
+    source: DashboardEvidenceSource = "dataset"
+    related_items: list[str] = Field(default_factory=list)
+
+
+class ConversationSuggestedQuestionGroups(BaseModel):
+    functional_user: list[str] = Field(default_factory=list)
+    expert_user: list[str] = Field(default_factory=list)
+
+
+class ConversationDashboardSpec(BaseModel):
+    executive_summary: ConversationExecutiveSummary = Field(default_factory=ConversationExecutiveSummary)
+    semantic_variables: list[ConversationSemanticVariable] = Field(default_factory=list)
+    priority_findings: list[ConversationPriorityFinding] = Field(default_factory=list)
+    agent_recommendations: list[ConversationAgentRecommendation] = Field(default_factory=list)
+    suggested_visualizations: list[ConversationSuggestedVisualization] = Field(default_factory=list)
+    active_chart_default: ConversationActiveChartDefault = Field(default_factory=ConversationActiveChartDefault)
+    conclusions: list[ConversationDashboardConclusion] = Field(default_factory=list)
+    evidence_line: list[ConversationEvidenceLineStep] = Field(default_factory=list)
+    suggested_questions: ConversationSuggestedQuestionGroups = Field(default_factory=ConversationSuggestedQuestionGroups)
+    llm_used: bool = False
+    llm_mode: str = "rules"
+    llm_detail: str | None = None
+
+
 class ConversationDashboardResponse(BaseModel):
     total: int
     insights: list[SelectedInsightDashboardItem] = Field(default_factory=list)
+    dashboard_spec: ConversationDashboardSpec = Field(default_factory=ConversationDashboardSpec)
+
+
+class ConversationChartVisualizationRequest(BaseModel):
+    id: str = ""
+    title: str = ""
+    chart_type: str = "bar"
+    x: str = ""
+    y: str = ""
+    metric: str = "count"
+    group_by: str = ""
+    aggregation: str = "count"
+    filters: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = ""
+    evidence_used: str = ""
+    question_answered: str = ""
+    audience: str = "ambos"
+
+
+class ConversationChartDataRequest(BaseModel):
+    visualization: ConversationChartVisualizationRequest
+    limit: int = Field(default=12, ge=1, le=50)
+    evidence_limit: int = Field(default=12, ge=1, le=1000)
+
+
+class ConversationChartSeriesPoint(BaseModel):
+    key: str
+    label: str
+    value: float
+    count: int
+    metric: str = "count"
+    filter: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationChartEvidenceItem(BaseModel):
+    evidence_id: str = ""
+    incident_id: str = ""
+    title: str = ""
+    preview: str = ""
+    source: str = ""
+    group: str = ""
+    priority: str = ""
+    service: str = ""
+    category: str = ""
+    metric_value: float | None = None
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationChartValidation(BaseModel):
+    status: str = "ok"
+    quality_score: int = 0
+    operation_ready: bool = False
+    llm_used_available_data: bool = True
+    chose_interpretable_variables: bool = True
+    chart_is_buildable: bool = True
+    uses_real_data: bool = True
+    requires_data: bool = False
+    uses_technical_variable: bool = False
+    possibly_invented: bool = False
+    evidence_returned: int = 0
+    validation_summary: str = ""
+    recommended_action: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    source: str = "duckdb"
+
+
+class ConversationChartDataResponse(BaseModel):
+    run_id: str
+    visualization_id: str = ""
+    title: str = ""
+    chart_type: str = "bar"
+    x: str = ""
+    metric: str = "count"
+    aggregation: str = "count"
+    total_records: int = 0
+    evidence_returned: int = 0
+    evidence_truncated: bool = False
+    series: list[ConversationChartSeriesPoint] = Field(default_factory=list)
+    evidence_samples: list[ConversationChartEvidenceItem] = Field(default_factory=list)
+    samples_by_key: dict[str, list[ConversationChartEvidenceItem]] = Field(default_factory=dict)
+    semantic_dictionary: list[ConversationSemanticVariable] = Field(default_factory=list)
+    validation: ConversationChartValidation = Field(default_factory=ConversationChartValidation)
 
 
 class BiSyncResponse(BaseModel):
