@@ -571,6 +571,57 @@ def test_semantic_dictionary_can_be_governed_per_project(tmp_path, monkeypatch) 
 
 
 @patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_uses_project_semantic_dictionary_for_business_axis(
+    load_run_evidences_mock,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR", str(tmp_path))
+    reload_semantic_dictionary()
+    try:
+        save_configured_semantic_variables(
+            [
+                {
+                    "name": "custom_business_axis",
+                    "label": "Eje funcional del proyecto",
+                    "role": "business",
+                    "type": "categorical",
+                    "can_chart": True,
+                }
+            ],
+            project_id="project-chart",
+        )
+        load_run_evidences_mock.return_value = pd.DataFrame(
+            [
+                {"incident_id": "INC001", "custom_business_axis": "Aplicacion", "preview": "Aplicacion"},
+                {"incident_id": "INC002", "custom_business_axis": "Base de datos", "preview": "Base"},
+                {"incident_id": "INC003", "custom_business_axis": "Aplicacion", "preview": "Aplicacion"},
+            ]
+        )
+
+        response = build_conversation_chart_data(
+            run_id="run-project",
+            project_id="project-chart",
+            visualization={
+                "id": "viz-project-axis",
+                "title": "Eje funcional por volumen",
+                "chart_type": "bar",
+                "x": "custom_business_axis",
+                "metric": "count",
+            },
+            limit=5,
+            evidence_limit=5,
+        )
+
+        assert response.run_id == "run-project"
+        assert response.validation.chart_is_buildable is True
+        assert response.x == "custom_business_axis"
+        assert any(item.name == "custom_business_axis" and item.label == "Eje funcional del proyecto" for item in response.semantic_dictionary)
+        assert response.series[0].key == "Aplicacion"
+        assert response.samples_by_key["Aplicacion"]
+    finally:
+        reload_semantic_dictionary()
+@patch("app.services.conversation.chart_data.load_run_evidences")
 def test_chart_data_response_marks_missing_dimension_as_not_buildable(load_run_evidences_mock) -> None:
     load_run_evidences_mock.return_value = pd.DataFrame(
         [
