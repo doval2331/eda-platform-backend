@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -13,6 +13,7 @@ DEFAULT_DICTIONARY_PATH = Path(__file__).with_name("semantic_dictionary.json")
 DEFAULT_PROJECT_DICTIONARY_DIR = Path(__file__).with_name("semantic_dictionaries")
 VALID_ROLES = {"business", "metric", "technical", "identifier", "unknown"}
 VALID_TYPES = {"categorical", "numeric", "boolean", "date", "text", ""}
+VALID_CONFIDENCE = {"alta", "media", "baja", ""}
 
 
 def semantic_key(value: Any) -> str:
@@ -31,9 +32,17 @@ def get_semantic_dictionary(
 ) -> dict[str, dict[str, Any]]:
     dictionary: dict[str, dict[str, Any]] = {}
     for key, value in base_dictionary.items():
-        _register_entry(dictionary, key, value)
-    for key, value in _configured_semantic_entries(_project_scope(project_id)).items():
-        _register_entry(dictionary, key, value)
+        _register_entry(dictionary, key, _normalize_base_entry(key, value))
+
+    for item in load_configured_semantic_variables(project_id=_project_scope(project_id)):
+        normalized = _normalize_configured_entry(item)
+        if not normalized["name"]:
+            continue
+        if not normalized["active"]:
+            _unregister_entry(dictionary, normalized["name"], normalized["aliases"])
+            continue
+        entry = _semantic_entry_from_normalized(normalized)
+        _register_entry(dictionary, normalized["name"], entry)
     return dictionary
 
 
@@ -56,7 +65,9 @@ def semantic_dictionary_status(
 ) -> dict[str, Any]:
     project_scope = _project_scope(project_id)
     path = semantic_dictionary_path(project_scope)
-    configured = load_configured_semantic_variables(project_id=project_scope)
+    configured = [_normalize_configured_entry(item) for item in load_configured_semantic_variables(project_id=project_scope)]
+    active_total = sum(1 for item in configured if item["active"])
+    inactive_total = sum(1 for item in configured if not item["active"])
     env_path = os.getenv("CONVERSATION_SEMANTIC_DICTIONARY_PATH")
     env_dir = os.getenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR")
     return {
@@ -69,6 +80,8 @@ def semantic_dictionary_status(
         "writable": path.parent.exists() and os.access(path.parent, os.W_OK),
         "base_total": len(base_dictionary),
         "configured_total": len(configured),
+        "active_configured_total": active_total,
+        "inactive_configured_total": inactive_total,
         "governed": bool(configured),
         "project_scope_enabled": bool(project_scope),
         "project_dictionary_dir": str(Path(env_dir or DEFAULT_PROJECT_DICTIONARY_DIR)),
@@ -115,6 +128,8 @@ def save_configured_semantic_variables(
         "scope": "project_file" if _project_scope(project_id) else "global_file",
         "project_id": _project_scope(project_id),
         "total": len(deduped),
+        "active_total": sum(1 for item in deduped if item["active"]),
+        "inactive_total": sum(1 for item in deduped if not item["active"]),
         "variables": deduped,
     }
 
@@ -126,21 +141,11 @@ def _configured_semantic_entries(project_scope: str = "") -> dict[str, dict[str,
     for item in entries:
         normalized = _normalize_configured_entry(item)
         name = normalized["name"]
-        if not name:
+        if not name or not normalized["active"]:
             continue
-        aliases = normalized["aliases"]
-        entry = {
-            "label": normalized["label"],
-            "role": normalized["role"],
-            "description": normalized["description"],
-            "recommended_use": normalized["recommended_use"],
-            "avoid_as_metric": normalized["avoid_as_metric"],
-            "can_chart": normalized["can_chart"],
-            "semantic_type": normalized["type"],
-            "aliases": aliases,
-        }
+        entry = _semantic_entry_from_normalized(normalized)
         result[name] = entry
-        for alias in aliases:
+        for alias in normalized["aliases"]:
             result[alias] = entry
     return result
 
@@ -152,12 +157,59 @@ def _project_scope(project_id: str | None) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", text)[:120]
 
 
+def _entry_keys(key: str, aliases: list[str]) -> list[str]:
+    values = [key, *aliases, semantic_key(key), *(semantic_key(alias) for alias in aliases)]
+    return [value for value in values if value]
+
+
 def _register_entry(dictionary: dict[str, dict[str, Any]], key: str, value: dict[str, Any]) -> None:
     entry = dict(value)
+    if entry.get("active") is False:
+        return
     aliases = [str(alias).strip() for alias in entry.get("aliases") or [] if str(alias).strip()]
-    for candidate in [key, *aliases, semantic_key(key), *(semantic_key(alias) for alias in aliases)]:
-        if candidate:
-            dictionary[candidate] = entry
+    entry.setdefault("aliases", aliases)
+    entry.setdefault("active", True)
+    entry.setdefault("source", "base")
+    entry.setdefault("confidence", "media")
+    for candidate in _entry_keys(key, aliases):
+        dictionary[candidate] = entry
+
+
+def _unregister_entry(dictionary: dict[str, dict[str, Any]], key: str, aliases: list[str]) -> None:
+    for candidate in _entry_keys(key, aliases):
+        dictionary.pop(candidate, None)
+
+
+def _normalize_base_entry(name: str, item: dict[str, Any]) -> dict[str, Any]:
+    entry = dict(item)
+    entry.setdefault("label", name)
+    entry.setdefault("role", "unknown")
+    entry.setdefault("semantic_type", entry.get("type") or "")
+    entry.setdefault("aliases", [])
+    entry.setdefault("can_chart", True)
+    entry.setdefault("avoid_as_metric", False)
+    entry.setdefault("description", "")
+    entry.setdefault("recommended_use", "")
+    entry.setdefault("active", True)
+    entry.setdefault("source", "base")
+    entry.setdefault("confidence", "media")
+    return entry
+
+
+def _semantic_entry_from_normalized(normalized: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "label": normalized["label"],
+        "role": normalized["role"],
+        "description": normalized["description"],
+        "recommended_use": normalized["recommended_use"],
+        "avoid_as_metric": normalized["avoid_as_metric"],
+        "can_chart": normalized["can_chart"],
+        "semantic_type": normalized["type"],
+        "aliases": normalized["aliases"],
+        "source": normalized["source"],
+        "confidence": normalized["confidence"],
+        "active": normalized["active"],
+    }
 
 
 def _normalize_configured_entry(item: dict[str, Any]) -> dict[str, Any]:
@@ -165,6 +217,8 @@ def _normalize_configured_entry(item: dict[str, Any]) -> dict[str, Any]:
     aliases = [str(alias).strip() for alias in item.get("aliases") or [] if str(alias).strip()]
     role = str(item.get("role") or "unknown").strip().lower()
     semantic_type = str(item.get("type") or item.get("semantic_type") or "").strip().lower()
+    confidence = str(item.get("confidence") or "media").strip().lower()
+    source = str(item.get("source") or item.get("configured_by") or "config").strip()
     return {
         "name": name,
         "aliases": aliases,
@@ -175,4 +229,7 @@ def _normalize_configured_entry(item: dict[str, Any]) -> dict[str, Any]:
         "avoid_as_metric": bool(item.get("avoid_as_metric", False)),
         "description": str(item.get("description") or "").strip(),
         "recommended_use": str(item.get("recommended_use") or "").strip(),
+        "source": source[:80] or "config",
+        "confidence": confidence if confidence in VALID_CONFIDENCE else "media",
+        "active": bool(item.get("active", True)),
     }

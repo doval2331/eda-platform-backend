@@ -375,11 +375,15 @@ class ConversationSemanticVariable(BaseModel):
     name: str
     label: str = ""
     role: DashboardVariableRole = "unknown"
+    aliases: list[str] = Field(default_factory=list)
     description: str = ""
     recommended_use: str = ""
     avoid_as_metric: bool = False
     can_chart: bool = True
     semantic_type: str = ""
+    source: str = ""
+    confidence: Literal["alta", "media", "baja", ""] = ""
+    active: bool = True
 
 
 class ConversationPriorityFinding(BaseModel):
@@ -463,6 +467,8 @@ class ConversationOperationalReadiness(BaseModel):
     active_run_id: str = ""
     run_ids: list[str] = Field(default_factory=list)
     decision_level: Literal["operational", "assisted_review", "interpretive"] = "interpretive"
+    evidence_mode: Literal["materialized", "partial", "interpretive"] = "interpretive"
+    trust_level: Literal["alta", "media", "baja"] = "baja"
     evidence_materialized: bool = False
     evidence_records: int = 0
     evidence_runs: int = 0
@@ -471,12 +477,16 @@ class ConversationOperationalReadiness(BaseModel):
     semantic_dictionary_source: str = ""
     semantic_dictionary_total: int = 0
     semantic_dictionary_configured_count: int = 0
+    semantic_dictionary_active_count: int = 0
+    semantic_dictionary_inactive_count: int = 0
     llm_validated: bool = False
     summary: str = ""
     functional_message: str = ""
     expert_message: str = ""
     recommended_next_step: str = ""
     warnings: list[str] = Field(default_factory=list)
+    blocking_reasons: list[str] = Field(default_factory=list)
+    required_actions: list[str] = Field(default_factory=list)
 
 
 class ConversationDashboardSpec(BaseModel):

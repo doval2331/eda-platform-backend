@@ -71,6 +71,7 @@ from app.services.conversation.chart_data import (
 from app.services.conversation.dashboard_spec import SEMANTIC_VARIABLES, build_dashboard_spec
 from app.services.conversation.semantic_dictionary import (
     get_semantic_dictionary,
+    load_configured_semantic_variables,
     reload_semantic_dictionary,
     save_configured_semantic_variables,
     semantic_dictionary_status,
@@ -1285,6 +1286,7 @@ def get_conversation_semantic_dictionary(
         reload_semantic_dictionary()
     dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES, project_id=dictionary_project_id)
     status = semantic_dictionary_status(SEMANTIC_VARIABLES, project_id=dictionary_project_id)
+    configured_variables = load_configured_semantic_variables(project_id=dictionary_project_id)
     seen: set[tuple[str, str, str]] = set()
     variables: list[dict[str, Any]] = []
     for lookup_key, entry in sorted(dictionary.items()):
@@ -1307,6 +1309,9 @@ def get_conversation_semantic_dictionary(
                 "description": entry.get("description") or "",
                 "recommended_use": entry.get("recommended_use") or "",
                 "aliases": entry.get("aliases") or [],
+                "source": entry.get("source") or "base",
+                "confidence": entry.get("confidence") or "media",
+                "active": entry.get("active", True),
             }
         )
     return {
@@ -1319,9 +1324,12 @@ def get_conversation_semantic_dictionary(
         "writable": status["writable"],
         "base_total": status["base_total"],
         "configured_total": status["configured_total"],
+        "active_configured_total": status.get("active_configured_total", 0),
+        "inactive_configured_total": status.get("inactive_configured_total", 0),
         "governed": status["governed"],
         "total": len(variables),
         "variables": variables,
+        "configured_variables": configured_variables,
     }
 
 
@@ -1346,6 +1354,8 @@ def update_conversation_semantic_dictionary(
         "scope": result["scope"],
         "project_id": result.get("project_id") or "",
         "total": result["total"],
+        "active_total": result.get("active_total", 0),
+        "inactive_total": result.get("inactive_total", 0),
         "variables": result["variables"],
     }
 

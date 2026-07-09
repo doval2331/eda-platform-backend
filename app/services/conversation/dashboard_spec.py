@@ -630,6 +630,10 @@ def _semantic_variables(columns: dict[str, Any], *, project_id: str | None = Non
                 "avoid_as_metric": avoid,
                 "can_chart": bool(base.get("can_chart", True)) and role not in {"identifier"},
                 "semantic_type": str(base.get("semantic_type") or ""),
+                "aliases": list(base.get("aliases") or []),
+                "source": str(base.get("source") or "base"),
+                "confidence": str(base.get("confidence") or "media"),
+                "active": bool(base.get("active", True)),
             }
         )
     return items
@@ -775,25 +779,54 @@ def _operational_readiness(
     evidence_records = int(evidence_summary.get("records_count") or 0)
     evidence_runs = sum(1 for rid in run_ids if not evidence_by_run.get(rid, pd.DataFrame()).empty)
     selected_insights = len(insights)
-    configured_count = len(load_configured_semantic_variables(project_id=project_id))
+    configured_entries = load_configured_semantic_variables(project_id=project_id)
+    configured_count = len(configured_entries)
+    active_configured_count = sum(1 for item in configured_entries if item.get("active", True))
+    inactive_configured_count = max(0, configured_count - active_configured_count)
     business_variables = [
         item for item in semantic_variables if str(item.get("role") or "").lower() == "business"
     ]
     run_scope = "empty" if not run_ids else "single_run" if len(run_ids) == 1 else "multi_run"
     warnings: list[str] = []
+    blocking_reasons: list[str] = []
+    required_actions: list[str] = []
 
     if run_scope == "multi_run":
-        warnings.append(
-            "La vista combina varias ejecuciones; selecciona una ejecucion concreta para decisiones operativas."
-        )
+        reason = "La vista combina varias ejecuciones; selecciona una ejecucion concreta para decisiones operativas."
+        warnings.append(reason)
+        blocking_reasons.append("Ejecuciones combinadas")
+        required_actions.append("Selecciona una sola ejecucion antes de tomar decisiones operativas.")
     if evidence_records <= 0:
-        warnings.append("No hay tickets o evidencias materializadas para drill-down operativo.")
+        reason = "No hay tickets o evidencias materializadas para drill-down operativo."
+        warnings.append(reason)
+        blocking_reasons.append("Sin evidencias reales materializadas")
+        required_actions.append("Materializa evidencias o vuelve a ejecutar el analisis antes de decidir.")
     if selected_insights <= 0:
-        warnings.append("No hay hallazgos guardados; el dashboard queda sin foco de analisis.")
+        reason = "No hay hallazgos guardados; el dashboard queda sin foco de analisis."
+        warnings.append(reason)
+        blocking_reasons.append("Sin hallazgos guardados")
+        required_actions.append("Guarda hallazgos desde el analisis exploratorio para dar foco al dashboard.")
     if not business_variables:
-        warnings.append("No se detectaron variables de negocio suficientes para graficos funcionales.")
+        reason = "No se detectaron variables de negocio suficientes para graficos funcionales."
+        warnings.append(reason)
+        blocking_reasons.append("Sin variables funcionales interpretables")
+        required_actions.append("Configura variables de negocio en el diccionario semantico del proyecto.")
     if configured_count <= 0:
-        warnings.append("El diccionario semantico usa la base por defecto; conviene gobernarlo por configuracion.")
+        reason = "El diccionario semantico usa la base por defecto; conviene gobernarlo por configuracion."
+        warnings.append(reason)
+        required_actions.append("Revisa o configura el diccionario semantico por proyecto.")
+    elif active_configured_count <= 0:
+        reason = "El diccionario semantico del proyecto no tiene variables activas para guiar al agente."
+        warnings.append(reason)
+        blocking_reasons.append("Diccionario semantico sin variables activas")
+        required_actions.append("Activa variables semanticas de negocio o metricas antes de usar recomendaciones del agente.")
+
+    if evidence_records > 0 and run_scope == "single_run":
+        evidence_mode = "materialized"
+    elif evidence_records > 0 or selected_insights > 0:
+        evidence_mode = "partial"
+    else:
+        evidence_mode = "interpretive"
 
     if (
         run_scope == "single_run"
@@ -833,12 +866,21 @@ def _operational_readiness(
         expert_message = "Contexto limitado: no hay evidencia materializada ni hallazgos suficientes para operar."
         recommended_next_step = "Ejecuta el analisis, guarda hallazgos y vuelve a generar el dashboard."
 
+    if status == "operational" and active_configured_count > 0:
+        trust_level = "alta"
+    elif status == "operational" or evidence_records > 0 or selected_insights > 0:
+        trust_level = "media"
+    else:
+        trust_level = "baja"
+
     return {
         "status": status,
         "run_scope": run_scope,
         "active_run_id": run_ids[0] if len(run_ids) == 1 else "",
         "run_ids": run_ids[:8],
         "decision_level": decision_level,
+        "evidence_mode": evidence_mode,
+        "trust_level": trust_level,
         "evidence_materialized": evidence_records > 0,
         "evidence_records": evidence_records,
         "evidence_runs": evidence_runs,
@@ -847,12 +889,16 @@ def _operational_readiness(
         "semantic_dictionary_source": str(semantic_dictionary_path(project_id)),
         "semantic_dictionary_total": len(semantic_variables),
         "semantic_dictionary_configured_count": configured_count,
+        "semantic_dictionary_active_count": active_configured_count,
+        "semantic_dictionary_inactive_count": inactive_configured_count,
         "llm_validated": False,
         "summary": summary,
         "functional_message": functional_message,
         "expert_message": expert_message,
         "recommended_next_step": recommended_next_step,
         "warnings": warnings[:6],
+        "blocking_reasons": _unique(blocking_reasons)[:6],
+        "required_actions": _unique(required_actions)[:6],
     }
 
 
@@ -1255,6 +1301,20 @@ def _apply_dashboard_contract_metadata(payload: dict[str, Any]) -> dict[str, Any
                 "El LLM propuso elementos que el backend ajusto o marco con advertencias.",
             ]
         )[:8]
+        readiness["blocking_reasons"] = _unique(
+            [
+                *readiness.get("blocking_reasons", []),
+                "Propuesta LLM ajustada por validacion backend",
+            ]
+        )[:8]
+        readiness["required_actions"] = _unique(
+            [
+                *readiness.get("required_actions", []),
+                "Revisa las advertencias antes de usar recomendaciones o graficos sugeridos por el LLM.",
+            ]
+        )[:8]
+        if readiness.get("trust_level") == "alta":
+            readiness["trust_level"] = "media"
     payload["operational_readiness"] = readiness
     return payload
 

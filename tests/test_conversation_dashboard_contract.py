@@ -16,11 +16,13 @@ from app.services.conversation.dashboard_spec import (
     _feedback_summary,
     _fallback_spec,
     _operational_readiness,
+    _refresh_dashboard_contract,
     _run_ids_from_context,
     _sanitize_llm_spec,
     _usage_summary,
 )
 from app.services.conversation.semantic_dictionary import (
+    get_semantic_dictionary,
     load_configured_semantic_variables,
     reload_semantic_dictionary,
     save_configured_semantic_variables,
@@ -113,6 +115,8 @@ def test_llm_dashboard_contract_flags_unknown_variables_and_unlinked_charts() ->
     }
 
     spec = _sanitize_llm_spec(raw_spec, fallback)
+    spec.llm_used = True
+    spec = _refresh_dashboard_contract(spec)
 
     assert spec.schema_version == "conversation-dashboard/v1"
     assert spec.contract_status == "warning"
@@ -121,6 +125,9 @@ def test_llm_dashboard_contract_flags_unknown_variables_and_unlinked_charts() ->
     assert spec.agent_recommendations[0].action_type == "chat"
     assert spec.agent_recommendations[0].linked_visualization_id == ""
     assert spec.conclusions[0].related_chart == ""
+    assert spec.operational_readiness.llm_validated is False
+    assert "Propuesta LLM ajustada por validacion backend" in spec.operational_readiness.blocking_reasons
+    assert any("Revisa las advertencias" in action for action in spec.operational_readiness.required_actions)
 
 
 def test_fallback_dashboard_splits_questions_by_profile() -> None:
@@ -399,8 +406,12 @@ def test_operational_readiness_reports_single_run_scope(load_configured_semantic
     assert readiness["semantic_dictionary_configured_count"] == 0
     assert readiness["status"] == "operational"
     assert readiness["decision_level"] == "operational"
+    assert readiness["evidence_mode"] == "materialized"
+    assert readiness["trust_level"] == "media"
     assert "casos reales" in readiness["functional_message"]
     assert readiness["recommended_next_step"]
+    assert readiness["blocking_reasons"] == []
+    assert any("diccionario semantico" in action for action in readiness["required_actions"])
 
 
 @patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
@@ -423,6 +434,10 @@ def test_operational_readiness_warns_when_multiple_runs_are_combined(load_config
     assert readiness["run_ids"] == ["run-a", "run-b"]
     assert readiness["status"] == "interpretive"
     assert readiness["decision_level"] == "assisted_review"
+    assert readiness["evidence_mode"] == "partial"
+    assert readiness["trust_level"] == "media"
+    assert "Ejecuciones combinadas" in readiness["blocking_reasons"]
+    assert any("Selecciona una sola ejecucion" in action for action in readiness["required_actions"])
     assert any("combina varias ejecuciones" in warning for warning in readiness["warnings"])
 
 
@@ -449,6 +464,7 @@ def test_operational_readiness_reports_governed_semantic_dictionary(load_configu
     assert readiness["semantic_dictionary_configured"] is True
     assert readiness["semantic_dictionary_total"] == 2
     assert readiness["semantic_dictionary_configured_count"] == 2
+    assert readiness["trust_level"] == "alta"
     assert readiness["expert_message"]
 
 
@@ -468,10 +484,52 @@ def test_operational_readiness_marks_partial_context_as_assisted_review(
 
     assert readiness["status"] == "interpretive"
     assert readiness["decision_level"] == "assisted_review"
+    assert readiness["evidence_mode"] == "partial"
+    assert readiness["trust_level"] == "media"
     assert readiness["evidence_materialized"] is False
+    assert "Sin evidencias reales materializadas" in readiness["blocking_reasons"]
+    assert any("Materializa evidencias" in action for action in readiness["required_actions"])
     assert any("evidencias" in warning for warning in readiness["warnings"])
     assert "orientar" in readiness["functional_message"]
     assert readiness["recommended_next_step"]
+
+
+@patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
+def test_operational_readiness_marks_empty_context_as_limited(
+    load_configured_semantic_variables_mock,
+) -> None:
+    load_configured_semantic_variables_mock.return_value = []
+
+    readiness = _operational_readiness(
+        run_ids=[],
+        evidence_by_run={},
+        evidence_summary={"records_count": 0},
+        semantic_variables=[],
+        insights=[],
+    )
+
+    assert readiness["status"] == "limited"
+    assert readiness["run_scope"] == "empty"
+    assert readiness["decision_level"] == "interpretive"
+    assert readiness["evidence_mode"] == "interpretive"
+    assert readiness["trust_level"] == "baja"
+    assert readiness["evidence_materialized"] is False
+    assert "Sin evidencias reales materializadas" in readiness["blocking_reasons"]
+    assert "Sin hallazgos guardados" in readiness["blocking_reasons"]
+    assert "Ejecuta el analisis" in readiness["recommended_next_step"]
+    assert readiness["required_actions"]
+
+
+def test_dashboard_spec_contract_defaults_keep_operational_fields() -> None:
+    spec = ConversationDashboardSpec.model_validate({})
+
+    assert spec.schema_version == "conversation-dashboard/v1"
+    assert spec.operational_readiness.evidence_mode == "interpretive"
+    assert spec.operational_readiness.trust_level == "baja"
+    assert spec.operational_readiness.blocking_reasons == []
+    assert spec.operational_readiness.required_actions == []
+    assert spec.operational_readiness.semantic_dictionary_active_count == 0
+    assert spec.operational_readiness.semantic_dictionary_inactive_count == 0
 
 
 def test_semantic_dictionary_status_exposes_governance_metadata() -> None:
@@ -499,11 +557,15 @@ def test_semantic_dictionary_can_be_governed_from_config_file(tmp_path, monkeypa
             [
                 {
                     "name": "No Of Reassignments",
+                    "aliases": ["reassignments"],
                     "label": "Cantidad de reasignaciones",
                     "role": "metric",
                     "type": "numeric",
                     "can_chart": True,
                     "avoid_as_metric": False,
+                    "source": "catalogo-it",
+                    "confidence": "alta",
+                    "active": True,
                 },
                 {
                     "name": "No_Of_Reassignments",
@@ -516,21 +578,44 @@ def test_semantic_dictionary_can_be_governed_from_config_file(tmp_path, monkeypa
                     "role": "not-a-role",
                     "type": "not-a-type",
                     "avoid_as_metric": True,
+                    "confidence": "invalida",
+                },
+                {
+                    "name": "affected_service",
+                    "label": "Servicio afectado desactivado",
+                    "role": "business",
+                    "type": "categorical",
+                    "active": False,
+                    "source": "gobierno-proyecto",
                 },
             ]
         )
         entries = load_configured_semantic_variables()
         status = semantic_dictionary_status({"affected_service": {"label": "Servicio", "role": "business"}})
+        governed_dictionary = get_semantic_dictionary(
+            {"affected_service": {"label": "Servicio", "role": "business"}}
+        )
 
-        assert result["total"] == 2
+        assert result["total"] == 3
+        assert result["active_total"] == 2
+        assert result["inactive_total"] == 1
         assert dictionary_path.exists()
         assert entries[0]["label"] == "Cantidad de reasignaciones"
+        assert entries[0]["source"] == "catalogo-it"
+        assert entries[0]["confidence"] == "alta"
+        assert entries[0]["active"] is True
         assert entries[1]["role"] == "unknown"
         assert entries[1]["type"] == ""
         assert entries[1]["avoid_as_metric"] is True
+        assert entries[1]["confidence"] == "media"
+        assert entries[2]["active"] is False
+        assert "affected_service" not in governed_dictionary
+        assert governed_dictionary["reassignments"]["label"] == "Cantidad de reasignaciones"
         assert status["scope"] == "environment_file"
         assert status["governed"] is True
-        assert status["configured_total"] == 2
+        assert status["configured_total"] == 3
+        assert status["active_configured_total"] == 2
+        assert status["inactive_configured_total"] == 1
     finally:
         reload_semantic_dictionary()
 
@@ -569,6 +654,42 @@ def test_semantic_dictionary_can_be_governed_per_project(tmp_path, monkeypatch) 
     finally:
         reload_semantic_dictionary()
 
+
+def test_operational_readiness_flags_project_dictionary_without_active_variables(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR", str(tmp_path))
+    reload_semantic_dictionary()
+
+    try:
+        save_configured_semantic_variables(
+            [
+                {
+                    "name": "affected_service",
+                    "label": "Servicio afectado",
+                    "role": "business",
+                    "type": "categorical",
+                    "active": False,
+                }
+            ],
+            project_id="project-without-active-dictionary",
+        )
+
+        readiness = _operational_readiness(
+            run_ids=["run-active"],
+            evidence_by_run={"run-active": pd.DataFrame([{"incident_id": "INC001"}])},
+            evidence_summary={"records_count": 1},
+            semantic_variables=[{"name": "affected_service", "role": "business"}],
+            insights=[{"id": "insight-1"}],
+            project_id="project-without-active-dictionary",
+        )
+
+        assert readiness["semantic_dictionary_configured"] is True
+        assert readiness["semantic_dictionary_active_count"] == 0
+        assert readiness["semantic_dictionary_inactive_count"] == 1
+        assert readiness["trust_level"] == "media"
+        assert "Diccionario semantico sin variables activas" in readiness["blocking_reasons"]
+        assert any("Activa variables semanticas" in action for action in readiness["required_actions"])
+    finally:
+        reload_semantic_dictionary()
 
 @patch("app.services.conversation.chart_data.load_run_evidences")
 def test_chart_data_uses_project_semantic_dictionary_for_business_axis(
