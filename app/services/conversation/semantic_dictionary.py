@@ -14,6 +14,7 @@ DEFAULT_PROJECT_DICTIONARY_DIR = Path(__file__).with_name("semantic_dictionaries
 VALID_ROLES = {"business", "metric", "technical", "identifier", "unknown"}
 VALID_TYPES = {"categorical", "numeric", "boolean", "date", "text", ""}
 VALID_CONFIDENCE = {"alta", "media", "baja", ""}
+VALID_PROFILES = {"funcional", "experto", "ambos"}
 
 
 def semantic_key(value: Any) -> str:
@@ -188,11 +189,18 @@ def _normalize_base_entry(name: str, item: dict[str, Any]) -> dict[str, Any]:
     entry.setdefault("aliases", [])
     entry.setdefault("can_chart", True)
     entry.setdefault("avoid_as_metric", False)
+    entry.setdefault("avoid_as_dimension", False)
     entry.setdefault("description", "")
     entry.setdefault("recommended_use", "")
     entry.setdefault("active", True)
     entry.setdefault("source", "base")
     entry.setdefault("confidence", "media")
+    entry.setdefault("enabled_profiles", [])
+    entry.setdefault("domain", "")
+    entry.setdefault("owner", "")
+    entry.setdefault("version", "")
+    entry.setdefault("max_cardinality", None)
+    entry.setdefault("max_null_ratio", None)
     return entry
 
 
@@ -203,12 +211,19 @@ def _semantic_entry_from_normalized(normalized: dict[str, Any]) -> dict[str, Any
         "description": normalized["description"],
         "recommended_use": normalized["recommended_use"],
         "avoid_as_metric": normalized["avoid_as_metric"],
+        "avoid_as_dimension": normalized["avoid_as_dimension"],
         "can_chart": normalized["can_chart"],
         "semantic_type": normalized["type"],
         "aliases": normalized["aliases"],
         "source": normalized["source"],
         "confidence": normalized["confidence"],
         "active": normalized["active"],
+        "enabled_profiles": normalized["enabled_profiles"],
+        "domain": normalized["domain"],
+        "owner": normalized["owner"],
+        "version": normalized["version"],
+        "max_cardinality": normalized["max_cardinality"],
+        "max_null_ratio": normalized["max_null_ratio"],
     }
 
 
@@ -219,6 +234,13 @@ def _normalize_configured_entry(item: dict[str, Any]) -> dict[str, Any]:
     semantic_type = str(item.get("type") or item.get("semantic_type") or "").strip().lower()
     confidence = str(item.get("confidence") or "media").strip().lower()
     source = str(item.get("source") or item.get("configured_by") or "config").strip()
+    profiles = [
+        str(profile).strip().lower()
+        for profile in item.get("enabled_profiles") or item.get("profiles") or []
+        if str(profile).strip().lower() in VALID_PROFILES
+    ]
+    max_cardinality = _optional_int(item.get("max_cardinality"))
+    max_null_ratio = _optional_float(item.get("max_null_ratio"))
     return {
         "name": name,
         "aliases": aliases,
@@ -227,9 +249,34 @@ def _normalize_configured_entry(item: dict[str, Any]) -> dict[str, Any]:
         "type": semantic_type if semantic_type in VALID_TYPES else "",
         "can_chart": bool(item.get("can_chart", True)),
         "avoid_as_metric": bool(item.get("avoid_as_metric", False)),
+        "avoid_as_dimension": bool(item.get("avoid_as_dimension", False)),
         "description": str(item.get("description") or "").strip(),
         "recommended_use": str(item.get("recommended_use") or "").strip(),
         "source": source[:80] or "config",
         "confidence": confidence if confidence in VALID_CONFIDENCE else "media",
         "active": bool(item.get("active", True)),
+        "enabled_profiles": profiles,
+        "domain": str(item.get("domain") or "").strip()[:80],
+        "owner": str(item.get("owner") or item.get("approved_by") or "").strip()[:80],
+        "version": str(item.get("version") or "").strip()[:40],
+        "max_cardinality": max_cardinality,
+        "max_null_ratio": max_null_ratio,
     }
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return min(number, 1.0)

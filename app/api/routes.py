@@ -1306,12 +1306,19 @@ def get_conversation_semantic_dictionary(
                 "semantic_type": entry.get("semantic_type") or "",
                 "can_chart": bool(entry.get("can_chart", True)),
                 "avoid_as_metric": bool(entry.get("avoid_as_metric", False)),
+                "avoid_as_dimension": bool(entry.get("avoid_as_dimension", False)),
                 "description": entry.get("description") or "",
                 "recommended_use": entry.get("recommended_use") or "",
                 "aliases": entry.get("aliases") or [],
                 "source": entry.get("source") or "base",
                 "confidence": entry.get("confidence") or "media",
                 "active": entry.get("active", True),
+                "enabled_profiles": entry.get("enabled_profiles") or [],
+                "domain": entry.get("domain") or "",
+                "owner": entry.get("owner") or "",
+                "version": entry.get("version") or "",
+                "max_cardinality": entry.get("max_cardinality"),
+                "max_null_ratio": entry.get("max_null_ratio"),
             }
         )
     return {

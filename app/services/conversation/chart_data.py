@@ -192,7 +192,7 @@ def build_conversation_chart_data(
         semantic_by_name=semantic_by_name,
     )
     if not x_col:
-        x_col = _best_dimension(filtered_df, columns, visualization)
+        x_col = _best_dimension(filtered_df, columns, visualization, semantic_by_name=semantic_by_name)
         if x_col:
             warnings.append(f"El eje sugerido no existe o no es interpretable; se uso {_humanize_column(x_col)}.")
     if not x_col:
@@ -371,6 +371,8 @@ def _resolve_column(
     semantic = semantic_by_name.get(column) or {}
     if role == "dimension" and semantic.get("can_chart") is False:
         return ""
+    if role == "dimension" and semantic.get("avoid_as_dimension"):
+        return ""
     if role == "dimension" and not _is_usable_dimension(df, column):
         return ""
     if role == "dimension" and not _has_values(df, column):
@@ -399,22 +401,36 @@ def _find_column(df: pd.DataFrame, candidate: Any) -> str:
     return ""
 
 
-def _best_dimension(df: pd.DataFrame, columns: dict[str, Any], visualization: dict[str, Any]) -> str:
+def _best_dimension(
+    df: pd.DataFrame,
+    columns: dict[str, Any],
+    visualization: dict[str, Any],
+    *,
+    semantic_by_name: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    semantics = semantic_by_name or {}
+
+    def allowed(column: str, *, allow_technical: bool = False) -> bool:
+        semantic = semantics.get(column) or {}
+        if semantic.get("can_chart") is False or semantic.get("avoid_as_dimension"):
+            return False
+        return _is_usable_dimension(df, column, allow_technical=allow_technical)
+
     for column in _preferred_dimensions_for_visualization(visualization):
         real_column = _find_column(df, column)
-        if real_column and _is_usable_dimension(df, real_column):
+        if real_column and allowed(real_column):
             return real_column
     for column in columns.get("business") or []:
-        if _is_usable_dimension(df, str(column)):
-            return str(column)
+        real_column = _find_column(df, column)
+        if real_column and allowed(real_column):
+            return real_column
     for column in columns.get("available") or []:
-        if (
-            column not in set(columns.get("technical") or [])
-            and column not in set(columns.get("numeric") or [])
-            and _is_usable_dimension(df, str(column))
-        ):
-            return str(column)
-    if "cluster_label" in df.columns and _is_usable_dimension(df, "cluster_label", allow_technical=True):
+        if column in set(columns.get("technical") or []) or column in set(columns.get("numeric") or []):
+            continue
+        real_column = _find_column(df, column)
+        if real_column and allowed(real_column):
+            return real_column
+    if "cluster_label" in df.columns and allowed("cluster_label", allow_technical=True):
         return "cluster_label"
     return ""
 
@@ -609,9 +625,23 @@ def _validation_payload(
     x_role = x_semantic.get("role") or "unknown"
     metric_role = metric_semantic.get("role") or "metric"
     uses_technical = x_role in {"technical", "identifier"} or metric_role in {"technical", "identifier"}
-    interpretable = x_role in {"business", "unknown"} and not x_semantic.get("avoid_as_metric")
+    dimension_blocked = bool(x_semantic.get("avoid_as_dimension"))
+    metric_blocked = bool(metric_semantic.get("avoid_as_metric")) if metric_col != "count" else False
+    interpretable = (
+        x_role in {"business", "unknown"}
+        and not x_semantic.get("avoid_as_metric")
+        and not dimension_blocked
+    )
     if metric_col != "count":
-        interpretable = interpretable and metric_role == "metric"
+        interpretable = interpretable and metric_role == "metric" and not metric_blocked
+    if dimension_blocked:
+        warnings.append(
+            f"La variable {_humanize_column(x_col)} esta bloqueada como dimension por el diccionario semantico."
+        )
+    if metric_blocked:
+        warnings.append(
+            f"La variable {_humanize_column(metric_col)} esta bloqueada como metrica por el diccionario semantico."
+        )
     if not interpretable:
         warnings.append("La visualizacion usa al menos una variable tecnica; revisar si aporta lectura funcional.")
     possibly_invented = bool(missing) or any(

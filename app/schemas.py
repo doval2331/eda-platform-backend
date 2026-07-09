@@ -379,11 +379,18 @@ class ConversationSemanticVariable(BaseModel):
     description: str = ""
     recommended_use: str = ""
     avoid_as_metric: bool = False
+    avoid_as_dimension: bool = False
     can_chart: bool = True
     semantic_type: str = ""
     source: str = ""
     confidence: Literal["alta", "media", "baja", ""] = ""
     active: bool = True
+    enabled_profiles: list[str] = Field(default_factory=list)
+    domain: str = ""
+    owner: str = ""
+    version: str = ""
+    max_cardinality: int | None = None
+    max_null_ratio: float | None = None
 
 
 class ConversationPriorityFinding(BaseModel):

@@ -206,6 +206,13 @@ def test_feedback_summary_reads_persisted_dashboard_feedback(list_chat_messages_
                 "target_title": "Revisar servicios",
                 "helpful": True,
                 "chart_validated": True,
+                "chart_generated": True,
+                "action_taken": True,
+                "reason": "action_taken",
+                "reason_label": "Termino en accion",
+                "final_state": "action_taken",
+                "drilldown_used": True,
+                "tickets_analyzed": 12,
                 "evidence_materialized": True,
                 "evidence_records": 42,
             },
@@ -218,6 +225,8 @@ def test_feedback_summary_reads_persisted_dashboard_feedback(list_chat_messages_
                 "recommendation_id": "rec-2",
                 "recommendation_title": "Variable confusa",
                 "helpful": False,
+                "reason": "wrong_variable",
+                "reason_label": "Variable incorrecta",
                 "has_warning": True,
             },
         },
@@ -235,6 +244,12 @@ def test_feedback_summary_reads_persisted_dashboard_feedback(list_chat_messages_
     assert summary["useful_recommendation_ids"] == ["rec-1"]
     assert summary["not_useful_recommendation_ids"] == ["rec-2"]
     assert "Variable confusa" in summary["not_useful_titles"]
+    assert summary["reason_counts"]["action_taken"] == 1
+    assert summary["reason_counts"]["wrong_variable"] == 1
+    assert summary["operational_outcomes"]["action_taken"] == 1
+    assert summary["operational_outcomes"]["drilldown_used"] == 1
+    assert summary["operational_outcomes"]["tickets_analyzed"] == 12
+    assert summary["requires_attention"][0]["reason"] == "wrong_variable"
 
 
 def test_dashboard_spec_preserves_recommendation_feedback_contract() -> None:
@@ -272,6 +287,7 @@ def test_usage_summary_reads_dashboard_events(list_chat_messages_mock) -> None:
             "metadata": {
                 "kind": "conversation_dashboard_event",
                 "event_type": "recommendation_graph_opened",
+                "recommendation_id": "rec-1",
                 "visualization_id": "viz-1",
                 "visualization_title": "Servicios por prioridad",
             },
@@ -281,19 +297,31 @@ def test_usage_summary_reads_dashboard_events(list_chat_messages_mock) -> None:
             "metadata": {
                 "kind": "conversation_dashboard_event",
                 "event_type": "tickets_sent_to_agent",
+                "recommendation_id": "rec-1",
                 "ticket_count": 12,
             },
             "created_at": "2026-07-08T01:06:00",
+        },
+        {
+            "metadata": {
+                "kind": "conversation_dashboard_event",
+                "event_type": "recommendations_presented",
+                "recommendation_ids": ["rec-1", "rec-2"],
+            },
+            "created_at": "2026-07-08T01:04:00",
         },
         {"metadata": {"kind": "conversation_dashboard_feedback", "target_id": "rec-1"}},
     ]
 
     summary = _usage_summary(run_ids=["run-1"], user_id="user-1")
 
-    assert summary["total"] == 2
+    assert summary["total"] == 3
     assert summary["charts_opened"] == 1
     assert summary["tickets_sent_to_agent"] == 1
     assert summary["events_by_type"]["recommendation_graph_opened"] == 1
+    assert summary["operational_funnel"]["tickets_sent_to_agent"] == 1
+    assert summary["by_recommendation"][0]["recommendation_id"] == "rec-1"
+    assert summary["ignored_recommendation_ids"] == ["rec-2"]
 
 
 def test_dashboard_context_uses_explicit_run_id_over_mixed_insights() -> None:
@@ -563,6 +591,13 @@ def test_semantic_dictionary_can_be_governed_from_config_file(tmp_path, monkeypa
                     "type": "numeric",
                     "can_chart": True,
                     "avoid_as_metric": False,
+                    "avoid_as_dimension": False,
+                    "enabled_profiles": ["funcional", "experto"],
+                    "domain": "incidencias-it",
+                    "owner": "mesa-servicio",
+                    "version": "2026.07",
+                    "max_cardinality": 100,
+                    "max_null_ratio": 0.4,
                     "source": "catalogo-it",
                     "confidence": "alta",
                     "active": True,
@@ -604,6 +639,13 @@ def test_semantic_dictionary_can_be_governed_from_config_file(tmp_path, monkeypa
         assert entries[0]["source"] == "catalogo-it"
         assert entries[0]["confidence"] == "alta"
         assert entries[0]["active"] is True
+        assert entries[0]["avoid_as_dimension"] is False
+        assert entries[0]["enabled_profiles"] == ["funcional", "experto"]
+        assert entries[0]["domain"] == "incidencias-it"
+        assert entries[0]["owner"] == "mesa-servicio"
+        assert entries[0]["version"] == "2026.07"
+        assert entries[0]["max_cardinality"] == 100
+        assert entries[0]["max_null_ratio"] == 0.4
         assert entries[1]["role"] == "unknown"
         assert entries[1]["type"] == ""
         assert entries[1]["avoid_as_metric"] is True
@@ -742,6 +784,85 @@ def test_chart_data_uses_project_semantic_dictionary_for_business_axis(
         assert response.samples_by_key["Aplicacion"]
     finally:
         reload_semantic_dictionary()
+
+
+@patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_does_not_use_blocked_semantic_dimension(
+    load_run_evidences_mock,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR", str(tmp_path))
+    reload_semantic_dictionary()
+    try:
+        save_configured_semantic_variables(
+            [
+                {
+                    "name": "custom_business_axis",
+                    "label": "Identificador tecnico no decisional",
+                    "role": "business",
+                    "type": "categorical",
+                    "can_chart": True,
+                    "avoid_as_dimension": True,
+                    "enabled_profiles": ["experto"],
+                },
+                {
+                    "name": "affected_service",
+                    "label": "Servicio afectado",
+                    "role": "business",
+                    "type": "categorical",
+                    "can_chart": True,
+                    "enabled_profiles": ["funcional", "experto"],
+                },
+            ],
+            project_id="project-chart-blocked-axis",
+        )
+        load_run_evidences_mock.return_value = pd.DataFrame(
+            [
+                {
+                    "incident_id": "INC001",
+                    "custom_business_axis": "ID-1",
+                    "affected_service": "Aplicacion",
+                    "preview": "Affected_Service=Aplicacion",
+                },
+                {
+                    "incident_id": "INC002",
+                    "custom_business_axis": "ID-2",
+                    "affected_service": "Base de datos",
+                    "preview": "Affected_Service=Base de datos",
+                },
+                {
+                    "incident_id": "INC003",
+                    "custom_business_axis": "ID-3",
+                    "affected_service": "Aplicacion",
+                    "preview": "Affected_Service=Aplicacion",
+                },
+            ]
+        )
+
+        response = build_conversation_chart_data(
+            run_id="run-project",
+            project_id="project-chart-blocked-axis",
+            visualization={
+                "id": "viz-blocked-axis",
+                "title": "Servicios por volumen",
+                "chart_type": "bar",
+                "x": "custom_business_axis",
+                "metric": "count",
+            },
+            limit=5,
+            evidence_limit=5,
+        )
+
+        assert response.validation.chart_is_buildable is True
+        assert response.x == "affected_service"
+        assert response.x != "custom_business_axis"
+        assert response.validation.chose_interpretable_variables is True
+        assert any("se uso Servicio afectado" in warning for warning in response.validation.warnings)
+    finally:
+        reload_semantic_dictionary()
+
+
 @patch("app.services.conversation.chart_data.load_run_evidences")
 def test_chart_data_response_marks_missing_dimension_as_not_buildable(load_run_evidences_mock) -> None:
     load_run_evidences_mock.return_value = pd.DataFrame(
@@ -847,6 +968,74 @@ def test_chart_data_returns_drilldown_samples_by_segment(load_run_evidences_mock
     assert response.series[0].filter == {"column": "affected_service", "operator": "eq", "value": "App"}
     assert len(response.samples_by_key["App"]) == 2
     assert {sample.incident_id for sample in response.samples_by_key["App"]} == {"INC001", "INC002"}
+
+
+@patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_is_scoped_per_run_when_execution_changes(load_run_evidences_mock) -> None:
+    def load_for_run(run_id: str) -> pd.DataFrame:
+        if run_id == "run-a":
+            return pd.DataFrame(
+                [
+                    {
+                        "incident_id": "INC-A1",
+                        "affected_service": "App A",
+                        "priority": "Alta",
+                        "preview": "Numero=INC-A1 | Affected_Service=App A | Priority=Alta",
+                    },
+                    {
+                        "incident_id": "INC-A2",
+                        "affected_service": "App A",
+                        "priority": "Alta",
+                        "preview": "Numero=INC-A2 | Affected_Service=App A | Priority=Alta",
+                    },
+                ]
+            )
+        if run_id == "run-b":
+            return pd.DataFrame(
+                [
+                    {
+                        "incident_id": "INC-B1",
+                        "affected_service": "DB B",
+                        "priority": "Baja",
+                        "preview": "Numero=INC-B1 | Affected_Service=DB B | Priority=Baja",
+                    }
+                ]
+            )
+        return pd.DataFrame()
+
+    load_run_evidences_mock.side_effect = load_for_run
+    visualization = {
+        "id": "viz-service",
+        "title": "Servicios por volumen",
+        "chart_type": "bar",
+        "x": "affected_service",
+        "metric": "count",
+    }
+
+    response_a = build_conversation_chart_data(
+        run_id="run-a",
+        visualization=visualization,
+        limit=5,
+        evidence_limit=5,
+    )
+    response_b = build_conversation_chart_data(
+        run_id="run-b",
+        visualization=visualization,
+        limit=5,
+        evidence_limit=5,
+    )
+
+    assert [call.args[0] for call in load_run_evidences_mock.call_args_list] == ["run-a", "run-b"]
+    assert response_a.run_id == "run-a"
+    assert response_b.run_id == "run-b"
+    assert response_a.series[0].key == "App A"
+    assert response_b.series[0].key == "DB B"
+    assert {sample.incident_id for sample in response_a.samples_by_key["App A"]} == {
+        "INC-A1",
+        "INC-A2",
+    }
+    assert {sample.incident_id for sample in response_b.samples_by_key["DB B"]} == {"INC-B1"}
+    assert "INC-B1" not in {sample.incident_id for sample in response_a.samples_by_key["App A"]}
 
 
 @patch("app.services.conversation.chart_data.load_run_evidences")

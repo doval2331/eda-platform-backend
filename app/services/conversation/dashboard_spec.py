@@ -400,6 +400,15 @@ def _semantic_project_id(run_rows: list[AnalysisRun]) -> str:
 
 def _feedback_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, Any]:
     """Summarize persisted dashboard feedback without exposing full chat history to the LLM."""
+    reason_labels = {
+        "useful": "Recomendacion util",
+        "irrelevant": "Recomendacion irrelevante",
+        "wrong_variable": "Variable incorrecta",
+        "chart_not_useful": "Grafico no util",
+        "insufficient_evidence": "Sin evidencia suficiente",
+        "needs_detail": "Requiere mas detalle",
+        "action_taken": "Termino en accion",
+    }
     rows: list[dict[str, Any]] = []
     for rid in run_ids[:8]:
         try:
@@ -414,33 +423,44 @@ def _feedback_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, A
             if isinstance(helpful, str):
                 helpful = helpful.strip().lower() in {"true", "1", "yes", "si", "util", "useful"}
             status = "useful" if helpful is True else "not_useful" if helpful is False else "unknown"
-            recommendation_id = str(
-                metadata.get("recommendation_id")
-                or metadata.get("target_id")
-                or metadata.get("id")
-                or ""
-            ).strip()
-            title = str(
-                metadata.get("recommendation_title")
-                or metadata.get("target_title")
-                or metadata.get("title")
-                or recommendation_id
-                or "Recomendacion sin titulo"
-            ).strip()
-            rows.append(
-                {
-                    "run_id": rid,
-                    "recommendation_id": recommendation_id,
-                    "title": title,
-                    "status": status,
-                    "chart_validated": bool(metadata.get("chart_validated")),
-                    "has_warning": bool(metadata.get("has_warning")),
-                    "visualization_id": str(metadata.get("visualization_id") or ""),
-                    "evidence_materialized": bool(metadata.get("evidence_materialized")),
-                    "evidence_records": int(_safe_float(metadata.get("evidence_records")) or 0),
-                    "created_at": str(message.get("created_at") or ""),
-                }
-            )
+            recommendation_id = str(metadata.get("recommendation_id") or metadata.get("target_id") or metadata.get("id") or "").strip()
+            title = str(metadata.get("recommendation_title") or metadata.get("target_title") or metadata.get("title") or recommendation_id or "Recomendacion sin titulo").strip()
+            reason = str(metadata.get("reason") or metadata.get("reason_code") or metadata.get("feedback_reason") or "").strip()
+            if not reason:
+                reason = "useful" if status == "useful" else "irrelevant" if status == "not_useful" else "sin_motivo"
+            action_taken = bool(metadata.get("action_taken") or reason == "action_taken")
+            final_state = str(metadata.get("final_state") or metadata.get("outcome") or "").strip()
+            if not final_state:
+                if action_taken:
+                    final_state = "action_taken"
+                elif status == "useful":
+                    final_state = "accepted"
+                elif status == "not_useful":
+                    final_state = "needs_revision"
+                else:
+                    final_state = "unknown"
+            rows.append({
+                "run_id": rid,
+                "recommendation_id": recommendation_id,
+                "title": title,
+                "status": status,
+                "reason": reason,
+                "reason_label": str(metadata.get("reason_label") or reason_labels.get(reason) or reason),
+                "final_state": final_state,
+                "action_taken": action_taken,
+                "chart_validated": bool(metadata.get("chart_validated")),
+                "chart_generated": bool(metadata.get("chart_generated") or metadata.get("chart_validated")),
+                "drilldown_used": bool(metadata.get("drilldown_used")),
+                "tickets_analyzed": int(_safe_float(metadata.get("tickets_analyzed")) or 0),
+                "exported": bool(metadata.get("exported")),
+                "report_prepared": bool(metadata.get("report_prepared")),
+                "has_warning": bool(metadata.get("has_warning")),
+                "visualization_id": str(metadata.get("visualization_id") or ""),
+                "evidence_materialized": bool(metadata.get("evidence_materialized")),
+                "evidence_records": int(_safe_float(metadata.get("evidence_records")) or 0),
+                "variables_used": list(metadata.get("variables_used") or [])[:8] if isinstance(metadata.get("variables_used"), list) else [],
+                "created_at": str(message.get("created_at") or ""),
+            })
 
     useful = [row for row in rows if row["status"] == "useful"]
     not_useful = [row for row in rows if row["status"] == "not_useful"]
@@ -448,6 +468,15 @@ def _feedback_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, A
     not_useful_ids = _unique([row["recommendation_id"] for row in not_useful if row["recommendation_id"]])
     useful_titles = _unique([row["title"] for row in useful if row["title"]])
     not_useful_titles = _unique([row["title"] for row in not_useful if row["title"]])
+
+    def _counts(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for item in items:
+            value = str(item.get(key) or "unknown")
+            result[value] = result.get(value, 0) + 1
+        return result
+
+    requires_attention = [row for row in rows if row["status"] == "not_useful" or row["reason"] in {"wrong_variable", "chart_not_useful", "insufficient_evidence"} or row["has_warning"]]
     return {
         "total": len(rows),
         "useful": len(useful),
@@ -456,19 +485,28 @@ def _feedback_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, A
         "not_useful_recommendation_ids": not_useful_ids[:20],
         "useful_titles": useful_titles[:12],
         "not_useful_titles": not_useful_titles[:12],
+        "reason_counts": _counts(rows, "reason"),
+        "useful_reason_counts": _counts(useful, "reason"),
+        "not_useful_reason_counts": _counts(not_useful, "reason"),
+        "requires_attention": [{"recommendation_id": row["recommendation_id"], "title": row["title"], "reason": row["reason"], "reason_label": row["reason_label"], "visualization_id": row["visualization_id"]} for row in requires_attention[-12:]],
+        "operational_outcomes": {
+            "action_taken": sum(1 for row in rows if row["action_taken"]),
+            "chart_generated": sum(1 for row in rows if row["chart_generated"]),
+            "drilldown_used": sum(1 for row in rows if row["drilldown_used"]),
+            "tickets_analyzed": sum(int(row.get("tickets_analyzed") or 0) for row in rows),
+            "exported": sum(1 for row in rows if row["exported"]),
+            "report_prepared": sum(1 for row in rows if row["report_prepared"]),
+            "final_state_counts": _counts(rows, "final_state"),
+        },
         "recent": rows[-12:],
-        "guidance": (
-            "Prioriza recomendaciones parecidas a las marcadas como utiles y revisa o reformula "
-            "las marcadas como no utiles. No ocultes una recomendacion si la evidencia real la respalda, "
-            "pero explica por que vuelve a aparecer."
-        )
-        if rows
-        else "Sin feedback persistido del usuario para este dashboard.",
+        "guidance": "Prioriza recomendaciones parecidas a las utiles o que terminaron en accion. Reformula las marcadas con variable incorrecta, grafico no util o sin evidencia suficiente." if rows else "Sin feedback persistido del usuario para este dashboard.",
     }
 
 
 def _usage_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
+    presented_ids: set[str] = set()
+    opened_ids: set[str] = set()
     for rid in run_ids[:8]:
         try:
             messages = list_chat_messages(run_id=rid, user_id=user_id, limit=500)
@@ -479,34 +517,54 @@ def _usage_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, Any]
             if metadata.get("kind") != "conversation_dashboard_event":
                 continue
             event_type = str(metadata.get("event_type") or "unknown").strip() or "unknown"
-            events.append(
-                {
-                    "run_id": rid,
-                    "event_type": event_type,
-                    "target_id": str(metadata.get("target_id") or metadata.get("visualization_id") or ""),
-                    "target_title": str(metadata.get("target_title") or metadata.get("visualization_title") or ""),
-                    "ticket_count": int(_safe_float(metadata.get("ticket_count")) or 0),
-                    "created_at": str(message.get("created_at") or ""),
-                }
-            )
+            recommendation_id = str(metadata.get("recommendation_id") or metadata.get("target_id") or "").strip()
+            if isinstance(metadata.get("recommendation_ids"), list):
+                presented_ids.update(str(item) for item in metadata.get("recommendation_ids") if item)
+            if recommendation_id and event_type in {"recommendation_graph_opened", "recommendation_applied", "recommendation_feedback", "tickets_sent_to_agent", "operational_selection_saved"}:
+                opened_ids.add(recommendation_id)
+            events.append({
+                "run_id": rid,
+                "event_type": event_type,
+                "target_id": str(metadata.get("target_id") or metadata.get("visualization_id") or ""),
+                "target_title": str(metadata.get("target_title") or metadata.get("visualization_title") or ""),
+                "recommendation_id": recommendation_id,
+                "visualization_id": str(metadata.get("visualization_id") or ""),
+                "ticket_count": int(_safe_float(metadata.get("ticket_count")) or 0),
+                "created_at": str(message.get("created_at") or ""),
+            })
     counts: dict[str, int] = {}
+    by_recommendation: dict[str, dict[str, Any]] = {}
     for event in events:
         event_type = event["event_type"]
         counts[event_type] = counts.get(event_type, 0) + 1
+        rid = str(event.get("recommendation_id") or "").strip()
+        if rid:
+            bucket = by_recommendation.setdefault(rid, {"recommendation_id": rid, "events": {}, "tickets": 0, "last_event": ""})
+            bucket["events"][event_type] = bucket["events"].get(event_type, 0) + 1
+            bucket["tickets"] += int(event.get("ticket_count") or 0)
+            bucket["last_event"] = event_type
+    funnel = {
+        "recommendations_presented": counts.get("recommendations_presented", 0),
+        "recommendations_opened": counts.get("recommendation_applied", 0) + counts.get("recommendation_graph_opened", 0),
+        "charts_generated": counts.get("recommendation_graph_opened", 0) + counts.get("visualization_selected", 0),
+        "drilldown_executed": counts.get("drilldown_opened", 0) + counts.get("evidence_base_opened", 0),
+        "tickets_sent_to_agent": counts.get("tickets_sent_to_agent", 0),
+        "feedback_received": counts.get("recommendation_feedback", 0),
+        "exports": counts.get("tickets_exported", 0),
+        "reports_prepared": counts.get("operational_selection_saved", 0),
+    }
     return {
         "total": len(events),
         "events_by_type": counts,
-        "charts_opened": counts.get("recommendation_graph_opened", 0) + counts.get("visualization_selected", 0),
+        "charts_opened": funnel["charts_generated"],
         "tickets_sent_to_agent": counts.get("tickets_sent_to_agent", 0),
         "exports": counts.get("tickets_exported", 0),
         "reports_prepared": counts.get("operational_selection_saved", 0),
+        "operational_funnel": funnel,
+        "by_recommendation": list(by_recommendation.values())[:40],
+        "ignored_recommendation_ids": sorted(presented_ids - opened_ids)[:20],
         "recent": events[-12:],
-        "guidance": (
-            "Usa estas senales para priorizar recomendaciones que el usuario realmente abre, manda al agente "
-            "o convierte en evidencia operativa."
-        )
-        if events
-        else "Sin eventos de uso persistidos para este dashboard.",
+        "guidance": "Usa estas senales para priorizar recomendaciones que el usuario abre, manda al agente o convierte en evidencia operativa." if events else "Sin eventos de uso persistidos para este dashboard.",
     }
 
 
@@ -628,12 +686,19 @@ def _semantic_variables(columns: dict[str, Any], *, project_id: str | None = Non
                 "description": base.get("description") or _semantic_description(text, role),
                 "recommended_use": base.get("recommended_use") or _semantic_use(label, role),
                 "avoid_as_metric": avoid,
+                "avoid_as_dimension": bool(base.get("avoid_as_dimension", False)),
                 "can_chart": bool(base.get("can_chart", True)) and role not in {"identifier"},
                 "semantic_type": str(base.get("semantic_type") or ""),
                 "aliases": list(base.get("aliases") or []),
+                "enabled_profiles": list(base.get("enabled_profiles") or []),
                 "source": str(base.get("source") or "base"),
                 "confidence": str(base.get("confidence") or "media"),
                 "active": bool(base.get("active", True)),
+                "domain": str(base.get("domain") or ""),
+                "owner": str(base.get("owner") or ""),
+                "version": str(base.get("version") or ""),
+                "max_cardinality": base.get("max_cardinality"),
+                "max_null_ratio": base.get("max_null_ratio"),
             }
         )
     return items
