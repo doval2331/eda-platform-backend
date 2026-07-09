@@ -12,12 +12,17 @@ from sqlalchemy.orm import Session
 from app.db import AnalysisRun
 from app.schemas import ConversationDashboardSpec
 from app.services.agents.llm_agent import design_dashboard_with_llm
-from app.services.conversation.semantic_dictionary import get_semantic_dictionary
+from app.services.conversation.semantic_dictionary import (
+    get_semantic_dictionary,
+    load_configured_semantic_variables,
+    semantic_dictionary_path,
+)
 from app.services.datasets.dataset_store import get_dataset_meta
 from app.services.runs.duckdb_store import (
     list_agent_cluster_insights,
     list_agent_decisions,
     list_agent_recommendations,
+    list_chat_messages,
     load_run_evidences,
 )
 
@@ -336,17 +341,29 @@ def build_dashboard_context(
 ) -> dict[str, Any]:
     run_ids = _run_ids_from_context(run_id, insights)
     run_rows = _load_run_rows(db, run_ids)
+    semantic_project_id = _semantic_project_id(run_rows)
     evidence_by_run = _load_evidences(run_ids)
     all_evidences = [df for df in evidence_by_run.values() if not df.empty]
     merged_evidences = pd.concat(all_evidences, ignore_index=True) if all_evidences else pd.DataFrame()
     dataset_summaries = _dataset_summaries(run_rows, user_id=user_id)
-    columns = _column_summary(merged_evidences)
-    semantic_variables = _semantic_variables(columns)
+    columns = _column_summary(merged_evidences, project_id=semantic_project_id)
+    semantic_variables = _semantic_variables(columns, project_id=semantic_project_id)
     metrics = _metrics_summary(run_rows, merged_evidences, insights)
     clusters = _cluster_summary(merged_evidences)
+    evidence_summary = _evidence_summary(merged_evidences)
     agent_recommendations = _safe_agent_payload(run_ids, list_agent_recommendations)
     agent_cluster_insights = _safe_agent_payload(run_ids, list_agent_cluster_insights)
     agent_decisions = _safe_agent_payload(run_ids, lambda rid: list_agent_decisions(rid, limit=6))
+    recommendation_feedback = _feedback_summary(run_ids=run_ids, user_id=user_id)
+    dashboard_usage_summary = _usage_summary(run_ids=run_ids, user_id=user_id)
+    operational_readiness = _operational_readiness(
+        run_ids=run_ids,
+        evidence_by_run=evidence_by_run,
+        evidence_summary=evidence_summary,
+        semantic_variables=semantic_variables,
+        insights=insights,
+        project_id=semantic_project_id,
+    )
 
     return {
         "instruction": (
@@ -359,14 +376,137 @@ def build_dashboard_context(
         "dataset_summary": dataset_summaries,
         "columns": columns,
         "semantic_variables": semantic_variables,
+        "semantic_project_id": semantic_project_id,
         "metrics": metrics,
         "clusters": clusters,
         "insights": [_compact_insight(item) for item in insights[:30]],
         "parameters": [_run_parameters(row) for row in run_rows],
         "execution_history": _execution_history(run_rows, agent_decisions),
         "existing_recommendations": agent_recommendations[:20],
+        "recommendation_feedback": recommendation_feedback,
+        "dashboard_usage_summary": dashboard_usage_summary,
         "cluster_interpretations": agent_cluster_insights[:20],
-        "evidence_summary": _evidence_summary(merged_evidences),
+        "evidence_summary": evidence_summary,
+        "operational_readiness": operational_readiness,
+    }
+
+
+def _semantic_project_id(run_rows: list[AnalysisRun]) -> str:
+    project_ids = _unique(
+        [str(getattr(row, "project_id", "") or "") for row in run_rows if getattr(row, "project_id", None)]
+    )
+    return project_ids[0] if len(project_ids) == 1 else ""
+
+
+def _feedback_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, Any]:
+    """Summarize persisted dashboard feedback without exposing full chat history to the LLM."""
+    rows: list[dict[str, Any]] = []
+    for rid in run_ids[:8]:
+        try:
+            messages = list_chat_messages(run_id=rid, user_id=user_id, limit=500)
+        except Exception:
+            continue
+        for message in messages:
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if metadata.get("kind") != "conversation_dashboard_feedback":
+                continue
+            helpful = metadata.get("helpful")
+            if isinstance(helpful, str):
+                helpful = helpful.strip().lower() in {"true", "1", "yes", "si", "util", "useful"}
+            status = "useful" if helpful is True else "not_useful" if helpful is False else "unknown"
+            recommendation_id = str(
+                metadata.get("recommendation_id")
+                or metadata.get("target_id")
+                or metadata.get("id")
+                or ""
+            ).strip()
+            title = str(
+                metadata.get("recommendation_title")
+                or metadata.get("target_title")
+                or metadata.get("title")
+                or recommendation_id
+                or "Recomendacion sin titulo"
+            ).strip()
+            rows.append(
+                {
+                    "run_id": rid,
+                    "recommendation_id": recommendation_id,
+                    "title": title,
+                    "status": status,
+                    "chart_validated": bool(metadata.get("chart_validated")),
+                    "has_warning": bool(metadata.get("has_warning")),
+                    "visualization_id": str(metadata.get("visualization_id") or ""),
+                    "evidence_materialized": bool(metadata.get("evidence_materialized")),
+                    "evidence_records": int(_safe_float(metadata.get("evidence_records")) or 0),
+                    "created_at": str(message.get("created_at") or ""),
+                }
+            )
+
+    useful = [row for row in rows if row["status"] == "useful"]
+    not_useful = [row for row in rows if row["status"] == "not_useful"]
+    useful_ids = _unique([row["recommendation_id"] for row in useful if row["recommendation_id"]])
+    not_useful_ids = _unique([row["recommendation_id"] for row in not_useful if row["recommendation_id"]])
+    useful_titles = _unique([row["title"] for row in useful if row["title"]])
+    not_useful_titles = _unique([row["title"] for row in not_useful if row["title"]])
+    return {
+        "total": len(rows),
+        "useful": len(useful),
+        "not_useful": len(not_useful),
+        "useful_recommendation_ids": useful_ids[:20],
+        "not_useful_recommendation_ids": not_useful_ids[:20],
+        "useful_titles": useful_titles[:12],
+        "not_useful_titles": not_useful_titles[:12],
+        "recent": rows[-12:],
+        "guidance": (
+            "Prioriza recomendaciones parecidas a las marcadas como utiles y revisa o reformula "
+            "las marcadas como no utiles. No ocultes una recomendacion si la evidencia real la respalda, "
+            "pero explica por que vuelve a aparecer."
+        )
+        if rows
+        else "Sin feedback persistido del usuario para este dashboard.",
+    }
+
+
+def _usage_summary(*, run_ids: list[str], user_id: str | None) -> dict[str, Any]:
+    events: list[dict[str, Any]] = []
+    for rid in run_ids[:8]:
+        try:
+            messages = list_chat_messages(run_id=rid, user_id=user_id, limit=500)
+        except Exception:
+            continue
+        for message in messages:
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            if metadata.get("kind") != "conversation_dashboard_event":
+                continue
+            event_type = str(metadata.get("event_type") or "unknown").strip() or "unknown"
+            events.append(
+                {
+                    "run_id": rid,
+                    "event_type": event_type,
+                    "target_id": str(metadata.get("target_id") or metadata.get("visualization_id") or ""),
+                    "target_title": str(metadata.get("target_title") or metadata.get("visualization_title") or ""),
+                    "ticket_count": int(_safe_float(metadata.get("ticket_count")) or 0),
+                    "created_at": str(message.get("created_at") or ""),
+                }
+            )
+    counts: dict[str, int] = {}
+    for event in events:
+        event_type = event["event_type"]
+        counts[event_type] = counts.get(event_type, 0) + 1
+    return {
+        "total": len(events),
+        "events_by_type": counts,
+        "charts_opened": counts.get("recommendation_graph_opened", 0) + counts.get("visualization_selected", 0),
+        "tickets_sent_to_agent": counts.get("tickets_sent_to_agent", 0),
+        "exports": counts.get("tickets_exported", 0),
+        "reports_prepared": counts.get("operational_selection_saved", 0),
+        "recent": events[-12:],
+        "guidance": (
+            "Usa estas senales para priorizar recomendaciones que el usuario realmente abre, manda al agente "
+            "o convierte en evidencia operativa."
+        )
+        if events
+        else "Sin eventos de uso persistidos para este dashboard.",
     }
 
 
@@ -429,7 +569,7 @@ def _dataset_summaries(rows: list[AnalysisRun], *, user_id: str) -> list[dict[st
     return summaries
 
 
-def _column_summary(df: pd.DataFrame) -> dict[str, Any]:
+def _column_summary(df: pd.DataFrame, *, project_id: str | None = None) -> dict[str, Any]:
     if df.empty:
         return {"available": [], "business": [], "numeric": [], "technical": []}
     available = list(map(str, df.columns.tolist()))
@@ -441,7 +581,7 @@ def _column_summary(df: pd.DataFrame) -> dict[str, Any]:
     technical: list[str] = []
     for col in available:
         key = _column_key(col)
-        base = _semantic_base(col)
+        base = _semantic_base(col, project_id=project_id)
         role = str(base.get("role") or "")
         if key in technical_keys or role in {"technical", "identifier"} or _looks_identifier(col):
             technical.append(col)
@@ -458,7 +598,7 @@ def _column_summary(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def _semantic_variables(columns: dict[str, Any]) -> list[dict[str, Any]]:
+def _semantic_variables(columns: dict[str, Any], *, project_id: str | None = None) -> list[dict[str, Any]]:
     available = list(columns.get("available") or [])
     business = set(columns.get("business") or [])
     numeric = set(columns.get("numeric") or [])
@@ -467,7 +607,7 @@ def _semantic_variables(columns: dict[str, Any]) -> list[dict[str, Any]]:
 
     for name in available[:80]:
         text = str(name)
-        base = dict(_semantic_base(text))
+        base = dict(_semantic_base(text, project_id=project_id))
         role = base.get("role")
         if not role:
             if text in technical or _looks_identifier(text):
@@ -623,6 +763,99 @@ def _evidence_summary(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _operational_readiness(
+    *,
+    run_ids: list[str],
+    evidence_by_run: dict[str, pd.DataFrame],
+    evidence_summary: dict[str, Any],
+    semantic_variables: list[dict[str, Any]],
+    insights: list[dict[str, Any]],
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    evidence_records = int(evidence_summary.get("records_count") or 0)
+    evidence_runs = sum(1 for rid in run_ids if not evidence_by_run.get(rid, pd.DataFrame()).empty)
+    selected_insights = len(insights)
+    configured_count = len(load_configured_semantic_variables(project_id=project_id))
+    business_variables = [
+        item for item in semantic_variables if str(item.get("role") or "").lower() == "business"
+    ]
+    run_scope = "empty" if not run_ids else "single_run" if len(run_ids) == 1 else "multi_run"
+    warnings: list[str] = []
+
+    if run_scope == "multi_run":
+        warnings.append(
+            "La vista combina varias ejecuciones; selecciona una ejecucion concreta para decisiones operativas."
+        )
+    if evidence_records <= 0:
+        warnings.append("No hay tickets o evidencias materializadas para drill-down operativo.")
+    if selected_insights <= 0:
+        warnings.append("No hay hallazgos guardados; el dashboard queda sin foco de analisis.")
+    if not business_variables:
+        warnings.append("No se detectaron variables de negocio suficientes para graficos funcionales.")
+    if configured_count <= 0:
+        warnings.append("El diccionario semantico usa la base por defecto; conviene gobernarlo por configuracion.")
+
+    if (
+        run_scope == "single_run"
+        and evidence_records > 0
+        and selected_insights > 0
+        and business_variables
+    ):
+        status = "operational"
+        summary = "Listo para analisis operativo: hay evidencia real, hallazgos guardados y variables interpretables."
+        decision_level = "operational"
+        functional_message = "Hay casos reales y hallazgos guardados para tomar decisiones con respaldo."
+        expert_message = (
+            "Vista operativa: existen evidencias materializadas, hallazgos seleccionados y variables "
+            "de negocio para graficos y drill-down."
+        )
+        recommended_next_step = "Abre un grafico, filtra los casos relacionados y envia la seleccion al agente."
+    elif evidence_records > 0 or selected_insights > 0:
+        status = "interpretive"
+        summary = (
+            "Lectura interpretativa con soporte parcial; revisa advertencias antes de tomar decisiones."
+        )
+        decision_level = "assisted_review"
+        functional_message = (
+            "La lectura sirve para orientar la revision, pero necesita completar casos o hallazgos "
+            "antes de decidir."
+        )
+        expert_message = (
+            "Soporte parcial: hay evidencia o hallazgos, pero falta completar la cadena de decision "
+            "con datos, variables de negocio o seleccion de evidencias."
+        )
+        recommended_next_step = "Completa la base de evidencia o guarda hallazgos antes de usarlo como decision."
+    else:
+        status = "limited"
+        summary = "Contexto limitado: ejecuta el pipeline y guarda hallazgos para habilitar analisis operativo."
+        decision_level = "interpretive"
+        functional_message = "Todavia falta contexto real para convertir esta lectura en acciones."
+        expert_message = "Contexto limitado: no hay evidencia materializada ni hallazgos suficientes para operar."
+        recommended_next_step = "Ejecuta el analisis, guarda hallazgos y vuelve a generar el dashboard."
+
+    return {
+        "status": status,
+        "run_scope": run_scope,
+        "active_run_id": run_ids[0] if len(run_ids) == 1 else "",
+        "run_ids": run_ids[:8],
+        "decision_level": decision_level,
+        "evidence_materialized": evidence_records > 0,
+        "evidence_records": evidence_records,
+        "evidence_runs": evidence_runs,
+        "selected_insights": selected_insights,
+        "semantic_dictionary_configured": configured_count > 0,
+        "semantic_dictionary_source": str(semantic_dictionary_path(project_id)),
+        "semantic_dictionary_total": len(semantic_variables),
+        "semantic_dictionary_configured_count": configured_count,
+        "llm_validated": False,
+        "summary": summary,
+        "functional_message": functional_message,
+        "expert_message": expert_message,
+        "recommended_next_step": recommended_next_step,
+        "warnings": warnings[:6],
+    }
+
+
 def _fallback_spec(context: dict[str, Any], insights: list[dict[str, Any]]) -> ConversationDashboardSpec:
     dataset = (context.get("dataset_summary") or [{}])[0] if context.get("dataset_summary") else {}
     metrics = context.get("metrics") or {}
@@ -667,6 +900,9 @@ def _fallback_spec(context: dict[str, Any], insights: list[dict[str, Any]]) -> C
                     "Que evidencia de DuckDB soporta la conclusion principal?",
                 ],
             },
+            "operational_readiness": context.get("operational_readiness") or {},
+            "recommendation_feedback": context.get("recommendation_feedback") or {},
+            "dashboard_usage_summary": context.get("dashboard_usage_summary") or {},
             "llm_used": False,
             "llm_mode": "rules",
             "llm_detail": "Especificacion generada por reglas locales.",
@@ -980,6 +1216,9 @@ def _sanitize_llm_spec(raw: dict[str, Any], fallback: ConversationDashboardSpec)
             fallback_payload["suggested_questions"],
             _dict_value(raw.get("suggested_questions")),
         ),
+        "operational_readiness": fallback_payload.get("operational_readiness") or {},
+        "recommendation_feedback": fallback_payload.get("recommendation_feedback") or {},
+        "dashboard_usage_summary": fallback_payload.get("dashboard_usage_summary") or {},
         "llm_used": False,
         "llm_mode": "rules",
         "llm_detail": None,
@@ -1006,6 +1245,17 @@ def _apply_dashboard_contract_metadata(payload: dict[str, Any]) -> dict[str, Any
     payload["llm_risk_flags"] = risk_flags
     blocking_flags = {"missing_variable", "invalid_chart_type", "unlinked_chart", "requires_data"}
     payload["contract_status"] = "warning" if blocking_flags.intersection(risk_flags) else "valid"
+    readiness = dict(payload.get("operational_readiness") or {})
+    readiness["llm_validated"] = bool(payload.get("llm_used")) and not blocking_flags.intersection(risk_flags)
+    if payload.get("llm_used") and blocking_flags.intersection(risk_flags):
+        readiness.setdefault("warnings", [])
+        readiness["warnings"] = _unique(
+            [
+                *readiness.get("warnings", []),
+                "El LLM propuso elementos que el backend ajusto o marco con advertencias.",
+            ]
+        )[:8]
+    payload["operational_readiness"] = readiness
     return payload
 
 
@@ -1611,9 +1861,9 @@ def _column_key(value: Any) -> str:
     return aliases.get(text, text)
 
 
-def _semantic_base(value: Any) -> dict[str, Any]:
+def _semantic_base(value: Any, *, project_id: str | None = None) -> dict[str, Any]:
     text = str(value or "")
-    dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES)
+    dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES, project_id=project_id)
     return dictionary.get(text) or dictionary.get(_column_key(text)) or {}
 
 

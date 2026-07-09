@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Any
@@ -157,6 +158,7 @@ def build_conversation_chart_data(
     visualization: dict[str, Any],
     limit: int = 12,
     evidence_limit: int = 12,
+    project_id: str | None = None,
 ) -> ConversationChartDataResponse:
     safe_limit = _bounded_int(limit, default=12, maximum=20)
     safe_evidence_limit = _bounded_int(evidence_limit, default=12, maximum=60)
@@ -172,8 +174,8 @@ def build_conversation_chart_data(
             warning="No hay evidencias materializadas en DuckDB para esta ejecucion.",
         )
 
-    columns = _column_summary(df)
-    semantic_items = _semantic_variables(columns)
+    columns = _column_summary(df, project_id=project_id)
+    semantic_items = _semantic_variables(columns, project_id=project_id)
     semantic_by_name = {item["name"]: item for item in semantic_items}
     warnings: list[str] = []
     missing: list[str] = []
@@ -239,11 +241,12 @@ def build_conversation_chart_data(
         segment = filtered_df[dimension_values == key]
         samples = _evidence_samples(segment, metric_col=metric_col, limit=safe_evidence_limit)
         samples_by_key[key] = samples
+        value = _safe_float(row.get("value")) or 0
         series.append(
             {
                 "key": key,
                 "label": key,
-                "value": float(row["value"] or 0),
+                "value": value,
                 "count": int(row["count"] or 0),
                 "metric": metric_col,
                 "filter": {"column": x_col, "operator": "eq", "value": key},
@@ -284,6 +287,20 @@ def build_conversation_chart_data(
     )
 
 
+def build_conversation_chart_error_response(
+    *,
+    run_id: str,
+    visualization: dict[str, Any],
+    warning: str,
+) -> ConversationChartDataResponse:
+    return _empty_response(
+        run_id=run_id,
+        visualization=visualization,
+        warning=warning,
+        missing=["backend_error"],
+    )
+
+
 def _bounded_int(value: Any, *, default: int, maximum: int) -> int:
     try:
         number = int(value)
@@ -309,9 +326,15 @@ def _aggregate(df: pd.DataFrame, *, x_col: str, metric_col: str, aggregation: st
     counts = grouped.size().reset_index(name="count")
     result = result.merge(counts, on=x_col, how="left")
     result = result.rename(columns={x_col: "key"})
-    result["value"] = pd.to_numeric(result["value"], errors="coerce").fillna(0)
+    result["value"] = _finite_numeric_series(result["value"], default=0)
     result["count"] = pd.to_numeric(result["count"], errors="coerce").fillna(0).astype(int)
     return result
+
+
+def _finite_numeric_series(series: pd.Series, *, default: float = 0) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    numeric = numeric.replace([math.inf, -math.inf], pd.NA)
+    return numeric.fillna(default)
 
 
 def _apply_filters(df: pd.DataFrame, filters: list[dict[str, Any]]) -> pd.DataFrame:
@@ -804,5 +827,7 @@ def _safe_float(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
         return None
     return number

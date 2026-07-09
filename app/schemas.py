@@ -457,6 +457,28 @@ class ConversationSuggestedQuestionGroups(BaseModel):
     expert_user: list[str] = Field(default_factory=list)
 
 
+class ConversationOperationalReadiness(BaseModel):
+    status: Literal["operational", "interpretive", "limited"] = "limited"
+    run_scope: Literal["single_run", "multi_run", "empty"] = "empty"
+    active_run_id: str = ""
+    run_ids: list[str] = Field(default_factory=list)
+    decision_level: Literal["operational", "assisted_review", "interpretive"] = "interpretive"
+    evidence_materialized: bool = False
+    evidence_records: int = 0
+    evidence_runs: int = 0
+    selected_insights: int = 0
+    semantic_dictionary_configured: bool = False
+    semantic_dictionary_source: str = ""
+    semantic_dictionary_total: int = 0
+    semantic_dictionary_configured_count: int = 0
+    llm_validated: bool = False
+    summary: str = ""
+    functional_message: str = ""
+    expert_message: str = ""
+    recommended_next_step: str = ""
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ConversationDashboardSpec(BaseModel):
     schema_version: str = "conversation-dashboard/v1"
     contract_status: str = "valid"
@@ -471,6 +493,9 @@ class ConversationDashboardSpec(BaseModel):
     conclusions: list[ConversationDashboardConclusion] = Field(default_factory=list)
     evidence_line: list[ConversationEvidenceLineStep] = Field(default_factory=list)
     suggested_questions: ConversationSuggestedQuestionGroups = Field(default_factory=ConversationSuggestedQuestionGroups)
+    operational_readiness: ConversationOperationalReadiness = Field(default_factory=ConversationOperationalReadiness)
+    recommendation_feedback: dict[str, Any] = Field(default_factory=dict)
+    dashboard_usage_summary: dict[str, Any] = Field(default_factory=dict)
     llm_used: bool = False
     llm_mode: str = "rules"
     llm_detail: str | None = None

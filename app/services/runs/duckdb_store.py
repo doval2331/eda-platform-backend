@@ -800,6 +800,7 @@ def list_chat_messages(
         row["llm_used"] = metadata.get("llm_used")
         row["llm_detail"] = metadata.get("llm_detail")
         row["llm_mode"] = metadata.get("llm_mode")
+        row["metadata"] = metadata
         records.append(row)
     return records
 

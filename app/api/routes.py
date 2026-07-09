@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -63,12 +64,16 @@ from app.services.datasets.dataset_profile import (
     build_dataset_profile_html,
 )
 from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
-from app.services.conversation.chart_data import build_conversation_chart_data
+from app.services.conversation.chart_data import (
+    build_conversation_chart_data,
+    build_conversation_chart_error_response,
+)
 from app.services.conversation.dashboard_spec import SEMANTIC_VARIABLES, build_dashboard_spec
 from app.services.conversation.semantic_dictionary import (
     get_semantic_dictionary,
     reload_semantic_dictionary,
     save_configured_semantic_variables,
+    semantic_dictionary_status,
     semantic_dictionary_path,
 )
 from app.services.conversation.chat_history import load_history, persist_exchange, persist_note
@@ -124,6 +129,7 @@ from app.services.projects.source_relationship import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 _upload_jobs: dict[str, dict] = {}
@@ -1265,12 +1271,20 @@ def get_conversation_dashboard(
 
 @router.get("/api/conversation/semantic-dictionary")
 def get_conversation_semantic_dictionary(
-    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
     refresh: bool = False,
+    run_id: str | None = None,
+    project_id: str | None = None,
 ):
+    dictionary_project_id = project_id
+    if run_id:
+        row = _get_run_or_404(db, run_id)
+        dictionary_project_id = row.project_id or dictionary_project_id
     if refresh:
         reload_semantic_dictionary()
-    dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES)
+    dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES, project_id=dictionary_project_id)
+    status = semantic_dictionary_status(SEMANTIC_VARIABLES, project_id=dictionary_project_id)
     seen: set[tuple[str, str, str]] = set()
     variables: list[dict[str, Any]] = []
     for lookup_key, entry in sorted(dictionary.items()):
@@ -1296,7 +1310,16 @@ def get_conversation_semantic_dictionary(
             }
         )
     return {
-        "source": str(semantic_dictionary_path()),
+        "source": str(semantic_dictionary_path(dictionary_project_id)),
+        "exists": status["exists"],
+        "scope": status["scope"],
+        "project_id": status.get("project_id") or "",
+        "env_var": status["env_var"],
+        "configurable": status["configurable"],
+        "writable": status["writable"],
+        "base_total": status["base_total"],
+        "configured_total": status["configured_total"],
+        "governed": status["governed"],
         "total": len(variables),
         "variables": variables,
     }
@@ -1304,15 +1327,24 @@ def get_conversation_semantic_dictionary(
 
 @router.put("/api/conversation/semantic-dictionary")
 def update_conversation_semantic_dictionary(
-    _user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
     payload: dict[str, Any] = Body(...),
+    run_id: str | None = None,
+    project_id: str | None = None,
 ):
+    dictionary_project_id = project_id
+    if run_id:
+        row = _get_run_or_404(db, run_id)
+        dictionary_project_id = row.project_id or dictionary_project_id
     entries = payload.get("variables") if isinstance(payload, dict) else None
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="Se esperaba un arreglo 'variables'.")
-    result = save_configured_semantic_variables(entries)
+    result = save_configured_semantic_variables(entries, project_id=dictionary_project_id)
     return {
         "source": result["path"],
+        "scope": result["scope"],
+        "project_id": result.get("project_id") or "",
         "total": result["total"],
         "variables": result["variables"],
     }
@@ -1329,13 +1361,26 @@ def get_run_conversation_chart_data(
     _user: Annotated[User, Depends(get_current_user)],
 ):
     row = _get_run_or_404(db, run_id)
-    _materialize_run_in_duckdb(row)
-    return build_conversation_chart_data(
-        run_id=run_id,
-        visualization=body.visualization.model_dump(),
-        limit=body.limit,
-        evidence_limit=body.evidence_limit,
-    )
+    visualization = body.visualization.model_dump()
+    try:
+        _materialize_run_in_duckdb(row)
+        return build_conversation_chart_data(
+            run_id=run_id,
+            visualization=visualization,
+            limit=body.limit,
+            evidence_limit=body.evidence_limit,
+            project_id=row.project_id,
+        )
+    except Exception as exc:
+        logger.exception("Error calculating conversation chart data for run_id=%s", run_id)
+        return build_conversation_chart_error_response(
+            run_id=run_id,
+            visualization=visualization,
+            warning=(
+                "No se pudo calcular el grafico real al consultar o agregar las evidencias. "
+                "Actualiza la ejecucion o prueba con otra vista sugerida."
+            ),
+        )
 
 
 @router.get("/api/metabase/status", response_model=MetabaseStatusResponse)

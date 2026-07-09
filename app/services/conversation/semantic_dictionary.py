@@ -10,6 +10,7 @@ from typing import Any
 
 
 DEFAULT_DICTIONARY_PATH = Path(__file__).with_name("semantic_dictionary.json")
+DEFAULT_PROJECT_DICTIONARY_DIR = Path(__file__).with_name("semantic_dictionaries")
 VALID_ROLES = {"business", "metric", "technical", "identifier", "unknown"}
 VALID_TYPES = {"categorical", "numeric", "boolean", "date", "text", ""}
 
@@ -23,11 +24,15 @@ def semantic_key(value: Any) -> str:
     return text
 
 
-def get_semantic_dictionary(base_dictionary: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def get_semantic_dictionary(
+    base_dictionary: dict[str, dict[str, Any]],
+    *,
+    project_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
     dictionary: dict[str, dict[str, Any]] = {}
     for key, value in base_dictionary.items():
         _register_entry(dictionary, key, value)
-    for key, value in _configured_semantic_entries().items():
+    for key, value in _configured_semantic_entries(_project_scope(project_id)).items():
         _register_entry(dictionary, key, value)
     return dictionary
 
@@ -36,12 +41,42 @@ def reload_semantic_dictionary() -> None:
     _configured_semantic_entries.cache_clear()
 
 
-def semantic_dictionary_path() -> Path:
+def semantic_dictionary_path(project_id: str | None = None) -> Path:
+    project_scope = _project_scope(project_id)
+    if project_scope:
+        base_dir = Path(os.getenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR") or DEFAULT_PROJECT_DICTIONARY_DIR)
+        return base_dir / f"{project_scope}.json"
     return Path(os.getenv("CONVERSATION_SEMANTIC_DICTIONARY_PATH") or DEFAULT_DICTIONARY_PATH)
 
 
-def load_configured_semantic_variables() -> list[dict[str, Any]]:
-    path = semantic_dictionary_path()
+def semantic_dictionary_status(
+    base_dictionary: dict[str, dict[str, Any]],
+    *,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    project_scope = _project_scope(project_id)
+    path = semantic_dictionary_path(project_scope)
+    configured = load_configured_semantic_variables(project_id=project_scope)
+    env_path = os.getenv("CONVERSATION_SEMANTIC_DICTIONARY_PATH")
+    env_dir = os.getenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR")
+    return {
+        "source": str(path),
+        "exists": path.exists(),
+        "scope": "project_file" if project_scope else "environment_file" if env_path else "default_file",
+        "project_id": project_scope,
+        "env_var": "CONVERSATION_SEMANTIC_DICTIONARY_DIR" if project_scope else "CONVERSATION_SEMANTIC_DICTIONARY_PATH",
+        "configurable": True,
+        "writable": path.parent.exists() and os.access(path.parent, os.W_OK),
+        "base_total": len(base_dictionary),
+        "configured_total": len(configured),
+        "governed": bool(configured),
+        "project_scope_enabled": bool(project_scope),
+        "project_dictionary_dir": str(Path(env_dir or DEFAULT_PROJECT_DICTIONARY_DIR)),
+    }
+
+
+def load_configured_semantic_variables(project_id: str | None = None) -> list[dict[str, Any]]:
+    path = semantic_dictionary_path(project_id)
     if not path.exists():
         return []
     try:
@@ -52,7 +87,11 @@ def load_configured_semantic_variables() -> list[dict[str, Any]]:
     return [item for item in entries if isinstance(item, dict)] if isinstance(entries, list) else []
 
 
-def save_configured_semantic_variables(entries: list[dict[str, Any]]) -> dict[str, Any]:
+def save_configured_semantic_variables(
+    entries: list[dict[str, Any]],
+    *,
+    project_id: str | None = None,
+) -> dict[str, Any]:
     normalized = [_normalize_configured_entry(item) for item in entries if isinstance(item, dict)]
     normalized = [item for item in normalized if item["name"]]
     seen: set[str] = set()
@@ -64,19 +103,25 @@ def save_configured_semantic_variables(entries: list[dict[str, Any]]) -> dict[st
         seen.add(key)
         deduped.append(item)
 
-    path = semantic_dictionary_path()
+    path = semantic_dictionary_path(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"variables": deduped}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     reload_semantic_dictionary()
-    return {"path": str(path), "total": len(deduped), "variables": deduped}
+    return {
+        "path": str(path),
+        "scope": "project_file" if _project_scope(project_id) else "global_file",
+        "project_id": _project_scope(project_id),
+        "total": len(deduped),
+        "variables": deduped,
+    }
 
 
-@lru_cache(maxsize=1)
-def _configured_semantic_entries() -> dict[str, dict[str, Any]]:
-    entries = load_configured_semantic_variables()
+@lru_cache(maxsize=64)
+def _configured_semantic_entries(project_scope: str = "") -> dict[str, dict[str, Any]]:
+    entries = load_configured_semantic_variables(project_id=project_scope)
     result: dict[str, dict[str, Any]] = {}
     for item in entries:
         normalized = _normalize_configured_entry(item)
@@ -98,6 +143,13 @@ def _configured_semantic_entries() -> dict[str, dict[str, Any]]:
         for alias in aliases:
             result[alias] = entry
     return result
+
+
+def _project_scope(project_id: str | None) -> str:
+    text = str(project_id or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", text)[:120]
 
 
 def _register_entry(dictionary: dict[str, dict[str, Any]], key: str, value: dict[str, Any]) -> None:

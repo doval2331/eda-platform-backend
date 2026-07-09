@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+import math
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
 
 from app.schemas import ConversationDashboardSpec
-from app.services.conversation.chart_data import build_conversation_chart_data
-from app.services.conversation.dashboard_spec import _sanitize_llm_spec
+from app.services.conversation.chart_data import (
+    build_conversation_chart_data,
+    build_conversation_chart_error_response,
+)
+from app.services.conversation.dashboard_spec import (
+    build_dashboard_context,
+    _feedback_summary,
+    _fallback_spec,
+    _operational_readiness,
+    _run_ids_from_context,
+    _sanitize_llm_spec,
+    _usage_summary,
+)
+from app.services.conversation.semantic_dictionary import (
+    load_configured_semantic_variables,
+    reload_semantic_dictionary,
+    save_configured_semantic_variables,
+    semantic_dictionary_status,
+)
 
 
 def _fallback_dashboard_spec() -> ConversationDashboardSpec:
@@ -104,6 +123,453 @@ def test_llm_dashboard_contract_flags_unknown_variables_and_unlinked_charts() ->
     assert spec.conclusions[0].related_chart == ""
 
 
+def test_fallback_dashboard_splits_questions_by_profile() -> None:
+    spec = _fallback_spec(
+        {
+            "dataset_summary": [{"dataset_name": "Incidencias IT", "rows": 120, "columns": 5}],
+            "columns": {
+                "column_count": 5,
+                "business": ["affected_service", "priority"],
+                "numeric": ["no_of_reassignments"],
+            },
+            "metrics": {"records_count": 120, "key_metrics": ["count"]},
+            "clusters": [],
+            "semantic_variables": [
+                {"name": "affected_service", "label": "Servicio afectado", "role": "business", "can_chart": True},
+                {"name": "priority", "label": "Prioridad", "role": "business", "can_chart": True},
+            ],
+            "operational_readiness": {"status": "operational", "run_scope": "single_run", "run_ids": ["run-1"]},
+        },
+        [
+            {
+                "id": "insight-1",
+                "title": "Servicio con prioridad alta",
+                "description": "Evidencia guardada.",
+                "metric_value": 10,
+                "metric_label": "Prioridad",
+            }
+        ],
+    )
+
+    assert spec.llm_used is False
+    assert spec.suggested_questions.functional_user
+    assert spec.suggested_questions.expert_user
+    assert spec.suggested_questions.functional_user != spec.suggested_questions.expert_user
+
+
+def test_llm_spec_resolves_semantic_aliases_before_contract_validation() -> None:
+    fallback = _fallback_dashboard_spec()
+    raw_spec = {
+        "agent_recommendations": [
+            {
+                "id": "rec-alias",
+                "title": "Ver servicios afectados",
+                "action_type": "chart",
+                "linked_visualization_id": "viz-alias",
+            }
+        ],
+        "suggested_visualizations": [
+            {
+                "id": "viz-alias",
+                "title": "Servicios por volumen",
+                "chart_type": "bar",
+                "x": "Servicio afectado",
+                "metric": "Incidencias",
+            }
+        ],
+    }
+
+    spec = _sanitize_llm_spec(raw_spec, fallback)
+
+    assert spec.suggested_visualizations[0].x == "affected_service"
+    assert spec.suggested_visualizations[0].metric == "count"
+    assert "missing_variable" not in spec.llm_risk_flags
+    assert spec.agent_recommendations[0].action_type == "chart"
+
+
+@patch("app.services.conversation.dashboard_spec.list_chat_messages")
+def test_feedback_summary_reads_persisted_dashboard_feedback(list_chat_messages_mock) -> None:
+    list_chat_messages_mock.return_value = [
+        {
+            "id": "msg-1",
+            "created_at": "2026-07-08T01:00:00",
+            "metadata": {
+                "kind": "conversation_dashboard_feedback",
+                "target_id": "rec-1",
+                "target_title": "Revisar servicios",
+                "helpful": True,
+                "chart_validated": True,
+                "evidence_materialized": True,
+                "evidence_records": 42,
+            },
+        },
+        {
+            "id": "msg-2",
+            "created_at": "2026-07-08T01:02:00",
+            "metadata": {
+                "kind": "conversation_dashboard_feedback",
+                "recommendation_id": "rec-2",
+                "recommendation_title": "Variable confusa",
+                "helpful": False,
+                "has_warning": True,
+            },
+        },
+        {
+            "id": "msg-3",
+            "metadata": {"kind": "conversation_dashboard_event", "event_type": "chart_opened"},
+        },
+    ]
+
+    summary = _feedback_summary(run_ids=["run-1"], user_id="user-1")
+
+    assert summary["total"] == 2
+    assert summary["useful"] == 1
+    assert summary["not_useful"] == 1
+    assert summary["useful_recommendation_ids"] == ["rec-1"]
+    assert summary["not_useful_recommendation_ids"] == ["rec-2"]
+    assert "Variable confusa" in summary["not_useful_titles"]
+
+
+def test_dashboard_spec_preserves_recommendation_feedback_contract() -> None:
+    spec = _fallback_spec(
+        {
+            "dataset_summary": [{"dataset_name": "Incidencias IT", "rows": 120, "columns": 5}],
+            "columns": {
+                "column_count": 5,
+                "business": ["affected_service", "priority"],
+                "numeric": ["no_of_reassignments"],
+            },
+            "metrics": {"records_count": 120, "key_metrics": ["count"]},
+            "clusters": [],
+            "semantic_variables": [
+                {"name": "affected_service", "label": "Servicio afectado", "role": "business", "can_chart": True},
+            ],
+            "recommendation_feedback": {
+                "total": 1,
+                "useful": 1,
+                "useful_recommendation_ids": ["rec-a"],
+            },
+            "operational_readiness": {"status": "operational", "run_scope": "single_run", "run_ids": ["run-1"]},
+        },
+        [],
+    )
+
+    assert spec.recommendation_feedback["total"] == 1
+    assert spec.recommendation_feedback["useful_recommendation_ids"] == ["rec-a"]
+
+
+@patch("app.services.conversation.dashboard_spec.list_chat_messages")
+def test_usage_summary_reads_dashboard_events(list_chat_messages_mock) -> None:
+    list_chat_messages_mock.return_value = [
+        {
+            "metadata": {
+                "kind": "conversation_dashboard_event",
+                "event_type": "recommendation_graph_opened",
+                "visualization_id": "viz-1",
+                "visualization_title": "Servicios por prioridad",
+            },
+            "created_at": "2026-07-08T01:05:00",
+        },
+        {
+            "metadata": {
+                "kind": "conversation_dashboard_event",
+                "event_type": "tickets_sent_to_agent",
+                "ticket_count": 12,
+            },
+            "created_at": "2026-07-08T01:06:00",
+        },
+        {"metadata": {"kind": "conversation_dashboard_feedback", "target_id": "rec-1"}},
+    ]
+
+    summary = _usage_summary(run_ids=["run-1"], user_id="user-1")
+
+    assert summary["total"] == 2
+    assert summary["charts_opened"] == 1
+    assert summary["tickets_sent_to_agent"] == 1
+    assert summary["events_by_type"]["recommendation_graph_opened"] == 1
+
+
+def test_dashboard_context_uses_explicit_run_id_over_mixed_insights() -> None:
+    run_ids = _run_ids_from_context(
+        "run-selected",
+        [
+            {"run_id": "run-old"},
+            {"run_id": "run-other"},
+        ],
+    )
+
+    assert run_ids == ["run-selected"]
+
+
+@patch("app.services.conversation.dashboard_spec.list_chat_messages")
+@patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
+@patch("app.services.conversation.dashboard_spec._safe_agent_payload")
+@patch("app.services.conversation.dashboard_spec.get_dataset_meta")
+@patch("app.services.conversation.dashboard_spec._load_evidences")
+@patch("app.services.conversation.dashboard_spec._load_run_rows")
+def test_dashboard_context_scopes_evidence_to_selected_run(
+    load_run_rows_mock,
+    load_evidences_mock,
+    get_dataset_meta_mock,
+    safe_agent_payload_mock,
+    load_configured_semantic_variables_mock,
+    list_chat_messages_mock,
+) -> None:
+    load_configured_semantic_variables_mock.return_value = []
+    list_chat_messages_mock.return_value = []
+    safe_agent_payload_mock.return_value = []
+    get_dataset_meta_mock.return_value = {
+        "filename": "Dataset seleccionado.csv",
+        "n_rows": 1,
+        "n_cols": 4,
+    }
+    load_run_rows_mock.return_value = [
+        SimpleNamespace(
+            id="run-selected",
+            project_id="project-selected",
+            dataset_id="dataset-selected",
+            source_id="dataset-selected",
+            source_name="Dataset seleccionado",
+            project_name="Prueba seleccionada",
+            source_type="csv",
+            n_samples=1,
+            created_at=None,
+            reduction_method="PCA",
+            seed=42,
+            outliers_count=0,
+            silhouette=None,
+            davies_bouldin=None,
+            result_json="{}",
+        )
+    ]
+    load_evidences_mock.return_value = {
+        "run-selected": pd.DataFrame(
+            [
+                {
+                    "incident_id": "INC-SELECTED",
+                    "affected_service": "App",
+                    "priority": "Alta",
+                    "preview": "Numero=INC-SELECTED | Affected_Service=App | Priority=Alta",
+                }
+            ]
+        )
+    }
+
+    db = object()
+    context = build_dashboard_context(
+        db=db,
+        user_id="user-1",
+        run_id="run-selected",
+        insights=[
+            {"id": "old", "run_id": "run-old", "metric_label": "Prioridad", "metric_value": 10},
+            {"id": "other", "run_id": "run-other", "metric_label": "Prioridad", "metric_value": 20},
+        ],
+    )
+
+    load_run_rows_mock.assert_called_once_with(db, ["run-selected"])
+    assert load_evidences_mock.call_args.args[0] == ["run-selected"]
+    assert context["run_ids"] == ["run-selected"]
+    assert context["semantic_project_id"] == "project-selected"
+    assert context["dataset_summary"][0]["run_id"] == "run-selected"
+    assert context["evidence_summary"]["records_count"] == 1
+    assert context["operational_readiness"]["active_run_id"] == "run-selected"
+    assert context["operational_readiness"]["run_scope"] == "single_run"
+
+
+@patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
+def test_operational_readiness_reports_single_run_scope(load_configured_semantic_variables_mock) -> None:
+    load_configured_semantic_variables_mock.return_value = []
+
+    readiness = _operational_readiness(
+        run_ids=["run-selected"],
+        evidence_by_run={
+            "run-selected": pd.DataFrame([{"incident_id": "INC001", "affected_service": "App"}]),
+            "run-other": pd.DataFrame([{"incident_id": "INC999", "affected_service": "DB"}]),
+        },
+        evidence_summary={"records_count": 1},
+        semantic_variables=[{"name": "affected_service", "role": "business"}],
+        insights=[{"id": "insight-1", "run_id": "run-selected"}],
+    )
+
+    assert readiness["run_scope"] == "single_run"
+    assert readiness["active_run_id"] == "run-selected"
+    assert readiness["run_ids"] == ["run-selected"]
+    assert readiness["evidence_runs"] == 1
+    assert readiness["semantic_dictionary_total"] == 1
+    assert readiness["semantic_dictionary_configured_count"] == 0
+    assert readiness["status"] == "operational"
+    assert readiness["decision_level"] == "operational"
+    assert "casos reales" in readiness["functional_message"]
+    assert readiness["recommended_next_step"]
+
+
+@patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
+def test_operational_readiness_warns_when_multiple_runs_are_combined(load_configured_semantic_variables_mock) -> None:
+    load_configured_semantic_variables_mock.return_value = []
+
+    readiness = _operational_readiness(
+        run_ids=["run-a", "run-b"],
+        evidence_by_run={
+            "run-a": pd.DataFrame([{"incident_id": "INC001", "affected_service": "App"}]),
+            "run-b": pd.DataFrame([{"incident_id": "INC002", "affected_service": "DB"}]),
+        },
+        evidence_summary={"records_count": 2},
+        semantic_variables=[{"name": "affected_service", "role": "business"}],
+        insights=[{"id": "insight-1", "run_id": "run-a"}],
+    )
+
+    assert readiness["run_scope"] == "multi_run"
+    assert readiness["active_run_id"] == ""
+    assert readiness["run_ids"] == ["run-a", "run-b"]
+    assert readiness["status"] == "interpretive"
+    assert readiness["decision_level"] == "assisted_review"
+    assert any("combina varias ejecuciones" in warning for warning in readiness["warnings"])
+
+
+@patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
+def test_operational_readiness_reports_governed_semantic_dictionary(load_configured_semantic_variables_mock) -> None:
+    load_configured_semantic_variables_mock.return_value = [
+        {"name": "affected_service", "label": "Servicio afectado", "role": "business"},
+        {"name": "no_of_reassignments", "label": "Cantidad de reasignaciones", "role": "metric"},
+    ]
+
+    readiness = _operational_readiness(
+        run_ids=["run-governed"],
+        evidence_by_run={
+            "run-governed": pd.DataFrame([{"incident_id": "INC001", "affected_service": "App"}]),
+        },
+        evidence_summary={"records_count": 1},
+        semantic_variables=[
+            {"name": "affected_service", "role": "business"},
+            {"name": "no_of_reassignments", "role": "metric"},
+        ],
+        insights=[{"id": "insight-1", "run_id": "run-governed"}],
+    )
+
+    assert readiness["semantic_dictionary_configured"] is True
+    assert readiness["semantic_dictionary_total"] == 2
+    assert readiness["semantic_dictionary_configured_count"] == 2
+    assert readiness["expert_message"]
+
+
+@patch("app.services.conversation.dashboard_spec.load_configured_semantic_variables")
+def test_operational_readiness_marks_partial_context_as_assisted_review(
+    load_configured_semantic_variables_mock,
+) -> None:
+    load_configured_semantic_variables_mock.return_value = []
+
+    readiness = _operational_readiness(
+        run_ids=["run-partial"],
+        evidence_by_run={"run-partial": pd.DataFrame()},
+        evidence_summary={"records_count": 0},
+        semantic_variables=[{"name": "affected_service", "role": "business"}],
+        insights=[{"id": "insight-1", "run_id": "run-partial"}],
+    )
+
+    assert readiness["status"] == "interpretive"
+    assert readiness["decision_level"] == "assisted_review"
+    assert readiness["evidence_materialized"] is False
+    assert any("evidencias" in warning for warning in readiness["warnings"])
+    assert "orientar" in readiness["functional_message"]
+    assert readiness["recommended_next_step"]
+
+
+def test_semantic_dictionary_status_exposes_governance_metadata() -> None:
+    status = semantic_dictionary_status(
+        {
+            "affected_service": {"label": "Servicio afectado", "role": "business"},
+            "priority": {"label": "Prioridad", "role": "business"},
+        }
+    )
+
+    assert status["configurable"] is True
+    assert status["env_var"] == "CONVERSATION_SEMANTIC_DICTIONARY_PATH"
+    assert status["scope"] in {"default_file", "environment_file"}
+    assert "source" in status
+    assert "writable" in status
+
+
+def test_semantic_dictionary_can_be_governed_from_config_file(tmp_path, monkeypatch) -> None:
+    dictionary_path = tmp_path / "semantic_dictionary.json"
+    monkeypatch.setenv("CONVERSATION_SEMANTIC_DICTIONARY_PATH", str(dictionary_path))
+    reload_semantic_dictionary()
+
+    try:
+        result = save_configured_semantic_variables(
+            [
+                {
+                    "name": "No Of Reassignments",
+                    "label": "Cantidad de reasignaciones",
+                    "role": "metric",
+                    "type": "numeric",
+                    "can_chart": True,
+                    "avoid_as_metric": False,
+                },
+                {
+                    "name": "No_Of_Reassignments",
+                    "label": "Reasignaciones duplicadas",
+                    "role": "business",
+                },
+                {
+                    "name": "cluster_label",
+                    "label": "Grupo tecnico",
+                    "role": "not-a-role",
+                    "type": "not-a-type",
+                    "avoid_as_metric": True,
+                },
+            ]
+        )
+        entries = load_configured_semantic_variables()
+        status = semantic_dictionary_status({"affected_service": {"label": "Servicio", "role": "business"}})
+
+        assert result["total"] == 2
+        assert dictionary_path.exists()
+        assert entries[0]["label"] == "Cantidad de reasignaciones"
+        assert entries[1]["role"] == "unknown"
+        assert entries[1]["type"] == ""
+        assert entries[1]["avoid_as_metric"] is True
+        assert status["scope"] == "environment_file"
+        assert status["governed"] is True
+        assert status["configured_total"] == 2
+    finally:
+        reload_semantic_dictionary()
+
+
+def test_semantic_dictionary_can_be_governed_per_project(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONVERSATION_SEMANTIC_DICTIONARY_DIR", str(tmp_path))
+    reload_semantic_dictionary()
+
+    try:
+        global_status = semantic_dictionary_status({"affected_service": {"label": "Servicio", "role": "business"}})
+        project_result = save_configured_semantic_variables(
+            [
+                {
+                    "name": "custom_business_axis",
+                    "label": "Eje funcional del proyecto",
+                    "role": "business",
+                    "type": "categorical",
+                    "can_chart": True,
+                }
+            ],
+            project_id="project-123",
+        )
+        project_entries = load_configured_semantic_variables(project_id="project-123")
+        project_status = semantic_dictionary_status(
+            {"affected_service": {"label": "Servicio", "role": "business"}},
+            project_id="project-123",
+        )
+
+        assert global_status["scope"] in {"default_file", "environment_file"}
+        assert project_result["scope"] == "project_file"
+        assert project_result["project_id"] == "project-123"
+        assert project_entries[0]["label"] == "Eje funcional del proyecto"
+        assert project_status["scope"] == "project_file"
+        assert project_status["project_id"] == "project-123"
+        assert project_status["governed"] is True
+    finally:
+        reload_semantic_dictionary()
+
+
 @patch("app.services.conversation.chart_data.load_run_evidences")
 def test_chart_data_response_marks_missing_dimension_as_not_buildable(load_run_evidences_mock) -> None:
     load_run_evidences_mock.return_value = pd.DataFrame(
@@ -132,3 +598,172 @@ def test_chart_data_response_marks_missing_dimension_as_not_buildable(load_run_e
     assert response.validation.chart_is_buildable is False
     assert response.validation.requires_data is True
     assert "dimension" in response.validation.missing
+
+
+@patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_without_materialized_evidence_is_not_operational(load_run_evidences_mock) -> None:
+    load_run_evidences_mock.return_value = pd.DataFrame()
+
+    response = build_conversation_chart_data(
+        run_id="run-empty",
+        visualization={
+            "id": "viz-empty",
+            "title": "Vista sin evidencia real",
+            "chart_type": "bar",
+            "x": "affected_service",
+            "metric": "count",
+        },
+        limit=5,
+        evidence_limit=5,
+    )
+
+    load_run_evidences_mock.assert_called_once_with("run-empty")
+    assert response.schema_version == "conversation-chart-data/v1"
+    assert response.run_id == "run-empty"
+    assert response.series == []
+    assert response.evidence_samples == []
+    assert response.validation.chart_is_buildable is False
+    assert response.validation.uses_real_data is False
+    assert response.validation.operation_ready is False
+    assert response.validation.requires_data is True
+    assert any("evidencias materializadas" in warning for warning in response.validation.warnings)
+
+
+@patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_returns_drilldown_samples_by_segment(load_run_evidences_mock) -> None:
+    load_run_evidences_mock.return_value = pd.DataFrame(
+        [
+            {
+                "incident_id": "INC001",
+                "affected_service": "App",
+                "priority": "Alta",
+                "preview": "Numero=INC001 | Affected_Service=App | Priority=Alta",
+            },
+            {
+                "incident_id": "INC002",
+                "affected_service": "App",
+                "priority": "Media",
+                "preview": "Numero=INC002 | Affected_Service=App | Priority=Media",
+            },
+            {
+                "incident_id": "INC003",
+                "affected_service": "DB",
+                "priority": "Alta",
+                "preview": "Numero=INC003 | Affected_Service=DB | Priority=Alta",
+            },
+        ]
+    )
+
+    response = build_conversation_chart_data(
+        run_id="run-1",
+        visualization={
+            "id": "viz-service",
+            "title": "Servicios por volumen",
+            "chart_type": "bar",
+            "x": "affected_service",
+            "metric": "count",
+        },
+        limit=5,
+        evidence_limit=5,
+    )
+
+    assert response.schema_version == "conversation-chart-data/v1"
+    load_run_evidences_mock.assert_called_once_with("run-1")
+    assert response.validation.chart_is_buildable is True
+    assert response.series[0].key == "App"
+    assert response.series[0].count == 2
+    assert response.series[0].filter == {"column": "affected_service", "operator": "eq", "value": "App"}
+    assert len(response.samples_by_key["App"]) == 2
+    assert {sample.incident_id for sample in response.samples_by_key["App"]} == {"INC001", "INC002"}
+
+
+@patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_uses_clear_alternative_when_llm_dimension_is_missing(load_run_evidences_mock) -> None:
+    load_run_evidences_mock.return_value = pd.DataFrame(
+        [
+            {"incident_id": "INC001", "affected_service": "App", "preview": "Affected_Service=App"},
+            {"incident_id": "INC002", "affected_service": "DB", "preview": "Affected_Service=DB"},
+        ]
+    )
+
+    response = build_conversation_chart_data(
+        run_id="run-1",
+        visualization={
+            "id": "viz-invented-axis",
+            "title": "Servicios por volumen de incidencias",
+            "chart_type": "bar",
+            "x": "Incidencias",
+            "metric": "count",
+        },
+        limit=5,
+        evidence_limit=5,
+    )
+
+    assert response.validation.chart_is_buildable is True
+    assert response.x == "affected_service"
+    assert any("se uso" in warning for warning in response.validation.warnings)
+
+
+@patch("app.services.conversation.chart_data.load_run_evidences")
+def test_chart_data_sanitizes_non_finite_metric_values(load_run_evidences_mock) -> None:
+    load_run_evidences_mock.return_value = pd.DataFrame(
+        [
+            {
+                "incident_id": "INC001",
+                "affected_service": "App",
+                "avg_resolution_hours": float("nan"),
+                "preview": "Numero=INC001 | Affected_Service=App | Duracion=NaN",
+            },
+            {
+                "incident_id": "INC002",
+                "affected_service": "App",
+                "avg_resolution_hours": float("inf"),
+                "preview": "Numero=INC002 | Affected_Service=App | Duracion=Infinity",
+            },
+            {
+                "incident_id": "INC003",
+                "affected_service": "DB",
+                "avg_resolution_hours": 4.0,
+                "preview": "Numero=INC003 | Affected_Service=DB | Duracion=4",
+            },
+        ]
+    )
+
+    response = build_conversation_chart_data(
+        run_id="run-1",
+        visualization={
+            "id": "viz-resolution",
+            "title": "Tiempo de resolucion por servicio",
+            "chart_type": "bar",
+            "x": "affected_service",
+            "metric": "avg_resolution_hours",
+            "aggregation": "mean",
+        },
+        limit=5,
+        evidence_limit=5,
+    )
+
+    assert response.validation.chart_is_buildable is True
+    assert all(math.isfinite(point.value) for point in response.series)
+    for samples in response.samples_by_key.values():
+        assert all(sample.metric_value is None or math.isfinite(sample.metric_value) for sample in samples)
+
+
+def test_chart_data_error_response_is_controlled() -> None:
+    response = build_conversation_chart_error_response(
+        run_id="run-1",
+        visualization={
+            "id": "viz-failed",
+            "title": "Mapa de clusters",
+            "chart_type": "scatter",
+            "x": "x",
+            "metric": "count",
+        },
+        warning="No se pudo calcular el grafico real.",
+    )
+
+    assert response.schema_version == "conversation-chart-data/v1"
+    assert response.validation.chart_is_buildable is False
+    assert response.validation.requires_data is True
+    assert "backend_error" in response.validation.missing
+    assert response.validation.warnings == ["No se pudo calcular el grafico real."]
