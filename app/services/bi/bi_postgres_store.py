@@ -207,6 +207,13 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             selected_at TIMESTAMP
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_active_run (
+            active_key TEXT PRIMARY KEY,
+            run_id TEXT,
+            published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
     ]
     with engine.begin() as con:
         for statement in statements:
@@ -521,6 +528,33 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
                     method="multi",
                     chunksize=_bi_insert_chunksize(df),
                 )
+
+        active_run_id = run_id
+        if not active_run_id:
+            active_run_id = con.execute(
+                text(
+                    """
+                    SELECT run_id
+                    FROM bi_runs
+                    ORDER BY created_at DESC NULLS LAST, run_id DESC
+                    LIMIT 1
+                    """
+                )
+            ).scalar()
+        if active_run_id:
+            con.execute(
+                text(
+                    """
+                    INSERT INTO bi_active_run(active_key, run_id, published_at)
+                    VALUES ('metabase_report', :run_id, CURRENT_TIMESTAMP)
+                    ON CONFLICT (active_key)
+                    DO UPDATE SET
+                        run_id = EXCLUDED.run_id,
+                        published_at = EXCLUDED.published_at
+                    """
+                ),
+                {"run_id": active_run_id},
+            )
 
     total_seconds = time.perf_counter() - started_at
     logger.info(

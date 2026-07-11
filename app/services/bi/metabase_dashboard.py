@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib import error, parse, request
 
+from sqlalchemy import create_engine, text
+
 from app.config import get_settings
 
 
@@ -339,42 +341,90 @@ def _replace_dashboard_cards(
     )
 
 
+def _ensure_reporting_state_table() -> None:
+    """Keep the active BI run explicit for the generated Metabase SQL."""
+    engine = create_engine(_settings().bi_database_url, pool_pre_ping=True)
+    with engine.begin() as con:
+        con.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS bi_active_run (
+                    active_key TEXT PRIMARY KEY,
+                    run_id TEXT,
+                    published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
+
 LATEST_RUN_CTE = """
-WITH run_quality AS (
-    SELECT
-        r.run_id,
-        r.created_at,
-        COUNT(NULLIF(COALESCE(e.category, e.categoria), '')) AS category_rows,
-        COUNT(NULLIF(COALESCE(e.affected_service, e.servicio_afectado), '')) AS service_rows,
-        COUNT(NULLIF(e.severity, '')) AS severity_rows,
-        COUNT(COALESCE(e.avg_resolution_hours, e.tiempo_resolucion_horas))
-            AS resolution_rows
-    FROM bi_runs r
-    LEFT JOIN bi_evidences e ON e.run_id = r.run_id
-    GROUP BY r.run_id, r.created_at
+WITH active_run AS (
+    SELECT ar.run_id
+    FROM bi_active_run ar
+    JOIN bi_runs br ON br.run_id = ar.run_id
+    WHERE ar.active_key = 'metabase_report'
+    LIMIT 1
 ),
 latest_run AS (
-    SELECT run_id
-    FROM run_quality
-    ORDER BY
-        CASE
-            WHEN category_rows > 0
-             AND service_rows > 0
-             AND severity_rows > 0
-             AND resolution_rows > 0
-            THEN 1 ELSE 0
-        END DESC,
-        (category_rows + service_rows + severity_rows + resolution_rows) DESC,
-        created_at DESC
-    LIMIT 1
+    SELECT COALESCE(
+        (SELECT run_id FROM active_run),
+        (
+            SELECT run_id
+            FROM bi_runs
+            ORDER BY created_at DESC NULLS LAST, run_id DESC
+            LIMIT 1
+        )
+    ) AS run_id
 )
 """
+
+
+CATEGORY_DIMENSION_SQL = """
+COALESCE(
+    NULLIF(COALESCE(e.categoria, e.category, e.sector), ''),
+    NULLIF(TRIM(substring(e.preview from 'Cat[^=]*=([^|]+)')), ''),
+    CASE
+        WHEN e.cluster_label = -1 THEN 'Casos atipicos'
+        ELSE 'Cluster ' || e.cluster_label::TEXT
+    END
+)
+""".strip()
+
+
+SERVICE_DIMENSION_SQL = """
+COALESCE(
+    NULLIF(COALESCE(e.servicio_afectado, e.affected_service, e.service_line), ''),
+    NULLIF(TRIM(substring(e.preview from 'Empresa=([^|]+)')), ''),
+    CASE
+        WHEN e.cluster_label = -1 THEN 'Casos atipicos'
+        ELSE 'Cluster ' || e.cluster_label::TEXT
+    END
+)
+""".strip()
+
+
+INCIDENT_DIMENSION_SQL = """
+COALESCE(
+    NULLIF(e.incident_id, ''),
+    NULLIF(TRIM(substring(e.preview from 'N[^=]*mero=([^|]+)')), ''),
+    e.evidence_id
+)
+""".strip()
+
+
+CLUSTER_DIMENSION_SQL = """
+CASE
+    WHEN c.cluster_label = -1 THEN 'Casos atipicos'
+    ELSE 'Cluster ' || c.cluster_label::TEXT
+END
+""".strip()
 
 
 DASHBOARD_CARDS = [
     DashboardCardSpec(
         name="Evidencias analizadas",
-        description="Total de evidencias publicadas para la ultima ejecucion.",
+        description="Total de evidencias publicadas para la ejecucion activa.",
         display="scalar",
         query=f"""
 {LATEST_RUN_CTE}
@@ -388,111 +438,127 @@ JOIN latest_run r ON e.run_id = r.run_id
         size_y=4,
     ),
     DashboardCardSpec(
-        name="SLA incumplido por categoria",
-        description="Categorias con mayor porcentaje de incumplimiento SLA.",
+        name="Volumen por categoria",
+        description="Categorias detectadas con mayor cantidad de evidencias publicadas.",
         display="bar",
         query=f"""
 {LATEST_RUN_CTE}
 SELECT
-    category,
-    ROUND(CAST(100.0 * sla_breached_count / NULLIF(evidence_count, 0) AS numeric), 2)
-        AS sla_incumplido_pct,
-    evidence_count AS evidencias
-FROM bi_sla_by_category s
-JOIN latest_run r ON s.run_id = r.run_id
-ORDER BY sla_incumplido_pct DESC NULLS LAST
+    categoria,
+    evidencias
+FROM (
+    SELECT
+        {CATEGORY_DIMENSION_SQL} AS categoria,
+        COUNT(*) AS evidencias
+    FROM bi_evidences e
+    JOIN latest_run r ON e.run_id = r.run_id
+    GROUP BY 1
+) ranked
+ORDER BY evidencias DESC
+LIMIT 12
 """.strip(),
         col=6,
         row=0,
         size_x=9,
         size_y=7,
-        dimensions=("category",),
-        metrics=("sla_incumplido_pct",),
+        dimensions=("categoria",),
+        metrics=("evidencias",),
     ),
     DashboardCardSpec(
-        name="Servicios con mayor riesgo",
-        description="Servicios afectados ordenados por riesgo operacional promedio.",
+        name="Volumen por empresa o servicio",
+        description="Empresas o servicios con mayor cantidad de evidencias publicadas.",
         display="bar",
         query=f"""
 {LATEST_RUN_CTE}
 SELECT
-    affected_service,
-    ROUND(
-        CAST(COALESCE(avg_risk, 100.0 * avg_sla_breach_rate) AS numeric),
-        2
-    ) AS riesgo_promedio,
-    evidence_count AS evidencias
-FROM bi_service_risk s
-JOIN latest_run r ON s.run_id = r.run_id
-ORDER BY riesgo_promedio DESC NULLS LAST
+    servicio,
+    evidencias
+FROM (
+    SELECT
+        {SERVICE_DIMENSION_SQL} AS servicio,
+        COUNT(*) AS evidencias
+    FROM bi_evidences e
+    JOIN latest_run r ON e.run_id = r.run_id
+    GROUP BY 1
+) ranked
+ORDER BY evidencias DESC
 LIMIT 12
 """.strip(),
         col=15,
         row=0,
         size_x=9,
         size_y=7,
-        dimensions=("affected_service",),
-        metrics=("riesgo_promedio",),
+        dimensions=("servicio",),
+        metrics=("evidencias",),
     ),
     DashboardCardSpec(
-        name="Volumen por severidad",
-        description="Distribucion de evidencias por severidad.",
+        name="Top clusters por evidencias",
+        description="Grupos tecnicos con mayor volumen de evidencias publicadas.",
         display="bar",
         query=f"""
 {LATEST_RUN_CTE}
 SELECT
-    COALESCE(severity, 'Sin severidad') AS severity,
-    COUNT(*) AS evidencias
-FROM bi_evidences e
-JOIN latest_run r ON e.run_id = r.run_id
-GROUP BY COALESCE(severity, 'Sin severidad')
-ORDER BY evidencias DESC
+    {CLUSTER_DIMENSION_SQL} AS grupo,
+    c.evidence_count AS evidencias
+FROM bi_cluster_summary c
+JOIN latest_run r ON c.run_id = r.run_id
+ORDER BY c.evidence_count DESC NULLS LAST
+LIMIT 12
 """.strip(),
         col=0,
         row=7,
         size_x=8,
         size_y=7,
-        dimensions=("severity",),
+        dimensions=("grupo",),
         metrics=("evidencias",),
     ),
     DashboardCardSpec(
-        name="Tiempo de resolucion por categoria",
-        description="Categorias con mayor tiempo promedio de resolucion.",
+        name="Incidencias con mas evidencias asociadas",
+        description="Incidencias que aparecen repetidas en la evidencia publicada.",
         display="bar",
         query=f"""
 {LATEST_RUN_CTE}
 SELECT
-    category,
-    ROUND(CAST(avg_resolution_hours AS numeric), 2) AS resolucion_horas
-FROM bi_sla_by_category s
-JOIN latest_run r ON s.run_id = r.run_id
-ORDER BY resolucion_horas DESC NULLS LAST
+    incidencia,
+    evidencias
+FROM (
+    SELECT
+        {INCIDENT_DIMENSION_SQL} AS incidencia,
+        COUNT(*) AS evidencias
+    FROM bi_evidences e
+    JOIN latest_run r ON e.run_id = r.run_id
+    GROUP BY 1
+) ranked
+WHERE incidencia IS NOT NULL
+ORDER BY evidencias DESC
+LIMIT 12
 """.strip(),
         col=8,
         row=7,
         size_x=8,
         size_y=7,
-        dimensions=("category",),
-        metrics=("resolucion_horas",),
+        dimensions=("incidencia",),
+        metrics=("evidencias",),
     ),
     DashboardCardSpec(
         name="Clusters prioritarios",
-        description="Clusters con mayor riesgo promedio y volumen de evidencias.",
+        description="Clusters con mayor volumen de evidencias y metricas auxiliares si existen.",
         display="table",
         query=f"""
 {LATEST_RUN_CTE}
 SELECT
-    cluster_label,
-    evidence_count AS evidencias,
+    {CLUSTER_DIMENSION_SQL} AS grupo,
+    c.evidence_count AS evidencias,
     ROUND(
-        CAST(COALESCE(avg_risk, 100.0 * avg_sla_breach_rate) AS numeric),
+        CAST(COALESCE(c.avg_risk, 100.0 * c.avg_sla_breach_rate) AS numeric),
         2
     ) AS riesgo_promedio,
-    ROUND(CAST(avg_sla_breach_rate AS numeric), 4) AS tasa_sla,
-    ROUND(CAST(avg_resolution_hours AS numeric), 2) AS resolucion_horas
+    ROUND(CAST(c.avg_sla_breach_rate AS numeric), 4) AS tasa_sla,
+    ROUND(CAST(c.avg_resolution_hours AS numeric), 2) AS resolucion_horas
 FROM bi_cluster_summary c
 JOIN latest_run r ON c.run_id = r.run_id
-ORDER BY riesgo_promedio DESC NULLS LAST, evidencias DESC
+ORDER BY c.evidence_count DESC NULLS LAST, riesgo_promedio DESC NULLS LAST
+LIMIT 50
 """.strip(),
         col=16,
         row=7,
@@ -526,6 +592,7 @@ ORDER BY selected_at DESC
 
 
 def create_conversation_dashboard() -> dict[str, Any]:
+    _ensure_reporting_state_table()
     session_id = _login()
     database_id = _ensure_database_id(session_id)
     dashboard_id, created = _create_or_reuse_dashboard(session_id)
