@@ -65,6 +65,12 @@ def _json_request(
             raw = response.read().decode("utf-8")
     except error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if path == "/api/session" and exc.code in {401, 403}:
+            raise MetabaseDashboardError(
+                "Metabase rechazo las credenciales configuradas. "
+                "Verifica METABASE_USERNAME y METABASE_PASSWORD en el archivo .env del backend, "
+                "confirma que ese usuario puede iniciar sesion en Metabase y reinicia el backend."
+            ) from exc
         raise MetabaseDashboardError(
             f"Metabase respondio {exc.code} en {method} {path}: {detail}"
         ) from exc

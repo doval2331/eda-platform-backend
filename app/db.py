@@ -89,8 +89,30 @@ engine = _engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
+RESULT_JSON_SAMPLE_LIMIT = 2_000
+
+
+def compact_pipeline_result_for_storage(result: dict) -> dict:
+    """Keep run history useful without storing huge visualization arrays in SQL."""
+    metadata = result.get("metadata") or []
+    points = result.get("X_2d") or []
+    labels = result.get("cluster_labels") or []
+    limit = min(RESULT_JSON_SAMPLE_LIMIT, len(metadata) or len(points) or len(labels))
+    compact = dict(result)
+    compact["X_2d"] = points[:limit]
+    compact["cluster_labels"] = labels[:limit]
+    compact["metadata"] = metadata[:limit]
+    compact["storage"] = {
+        "compact": True,
+        "sample_limit": RESULT_JSON_SAMPLE_LIMIT,
+        "stored_points": limit,
+        "total_points": max(len(metadata), len(points), len(labels)),
+        "reason": "Historial SQL compacto; las evidencias completas se materializan en DuckDB.",
+    }
+    return compact
+
 def _ensure_analysis_run_columns() -> None:
-    """Añade columnas nuevas sin migración formal (SQLite / PostgreSQL)."""
+    """Add new columns without a formal migration (SQLite / PostgreSQL)."""
     url = get_settings().database_url
     additions = {
         "n_clusters": "INTEGER",
@@ -160,6 +182,7 @@ def get_db():
 
 def save_run(db: Session, *, payload: dict) -> AnalysisRun:
     result = payload["result"]
+    result_storage = payload.get("result_storage") or result
     metrics = result["metrics"]
     row = AnalysisRun(
         id=str(uuid.uuid4()),
@@ -178,7 +201,7 @@ def save_run(db: Session, *, payload: dict) -> AnalysisRun:
         ),
         n_clusters=metrics.get("n_clusters"),
         noise_pct=metrics.get("noise_pct"),
-        result_json=json.dumps(result, ensure_ascii=False),
+        result_json=json.dumps(result_storage, ensure_ascii=False),
         project_id=payload.get("project_id"),
         source_type=payload.get("source_type"),
         source_id=payload.get("source_id"),

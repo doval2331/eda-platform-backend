@@ -1,5 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +12,8 @@ from sqlalchemy.engine import Connection, Engine
 from app.config import get_settings
 from app.services.bi.metabase_embed import embedding_is_configured
 from app.services.runs.duckdb_store import _connect, init_duckdb
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -484,30 +488,24 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
             tables={},
         )
 
+    started_at = time.perf_counter()
     engine = _engine()
     init_bi_schema(engine)
     frames = _load_bi_frames(run_id=run_id)
+    load_seconds = time.perf_counter() - started_at
 
     with engine.begin() as con:
-        if run_id:
-            for table in (
-                "bi_selected_insights",
-                "bi_service_risk",
-                "bi_sla_by_category",
-                "bi_cluster_summary",
-                "bi_evidences",
-                "bi_runs",
-            ):
+        for table in (
+            "bi_selected_insights",
+            "bi_service_risk",
+            "bi_sla_by_category",
+            "bi_cluster_summary",
+            "bi_evidences",
+            "bi_runs",
+        ):
+            if run_id:
                 con.execute(text(f"DELETE FROM {table} WHERE run_id = :run_id"), {"run_id": run_id})
-        else:
-            for table in (
-                "bi_selected_insights",
-                "bi_service_risk",
-                "bi_sla_by_category",
-                "bi_cluster_summary",
-                "bi_evidences",
-                "bi_runs",
-            ):
+            else:
                 con.execute(text(f"DELETE FROM {table}"))
 
         counts: dict[str, int] = {}
@@ -524,9 +522,23 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
                     chunksize=_bi_insert_chunksize(df),
                 )
 
+    total_seconds = time.perf_counter() - started_at
+    logger.info(
+        "bi_sync completed run_id=%s load_seconds=%.2f total_seconds=%.2f counts=%s",
+        run_id or "all",
+        load_seconds,
+        total_seconds,
+        counts,
+    )
+
     return BiSyncResult(
         status="ok",
-        message="Tablas BI sincronizadas en PostgreSQL para Metabase.",
+        message=(
+            "Tablas BI sincronizadas en PostgreSQL para Metabase "
+            f"con la ejecucion {run_id}."
+            if run_id
+            else "Tablas BI sincronizadas en PostgreSQL para Metabase."
+        ),
         tables=counts,
     )
 
