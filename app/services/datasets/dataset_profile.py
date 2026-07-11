@@ -74,7 +74,7 @@ def build_dataset_full_profile(
     df = pd.read_csv(csv_path, nrows=sample_rows)
 
     numeric = [c for c in (meta.get("numeric_columns") or []) if c in df.columns]
-    alerts = _quality_alerts(df, numeric, base.get("columns") or [])
+    alerts = _quality_alerts(df, numeric, base.get("columns") or [], meta=meta)
     correlations = _correlation_pairs(df, numeric)
     duplicate_pct = float(df.duplicated().mean() * 100) if len(df) else 0.0
 
@@ -145,8 +145,16 @@ def _quality_alerts(
     df: pd.DataFrame,
     numeric: list[str],
     columns: list[dict[str, Any]],
+    *,
+    meta: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
+    column_summaries = {
+        str(item.get("name")): item
+        for item in (meta or {}).get("column_summaries", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    semantic_lookup = _semantic_lookup()
     dup_pct = float(df.duplicated().mean() * 100) if len(df) else 0.0
     if dup_pct >= 5:
         alerts.append(
@@ -156,19 +164,45 @@ def _quality_alerts(
             }
         )
     for col_info in columns:
+        name = str(col_info.get("name") or "")
         null_pct = col_info.get("null_pct") or 0
-        if null_pct >= 40:
+        summary = column_summaries.get(name) or {}
+        semantic = _semantic_for_column(name, semantic_lookup)
+        label = semantic.get("label") or name
+        is_sparse_optional = null_pct >= 85 and not _is_core_quality_column(name, semantic)
+        if is_sparse_optional:
+            alerts.append(
+                {
+                    "level": "info",
+                    "message": (
+                        f"Variable opcional «{label}»: {null_pct:.0f}% sin datos. "
+                        "No se recomienda para graficos ni conclusiones salvo evidencia suficiente."
+                    ),
+                    "column": name,
+                    "reason": "low_coverage_optional_variable",
+                }
+            )
+        elif null_pct >= 40:
+            recommendation = (
+                " Revisar antes de usarla en dashboard o LLM."
+                if summary.get("useful_for_analysis") is not False
+                else " El backend la marca como no recomendada para analisis."
+            )
             alerts.append(
                 {
                     "level": "warning",
-                    "message": f"Columna «{col_info['name']}»: {null_pct:.0f}% valores nulos.",
+                    "message": f"Columna «{label}»: {null_pct:.0f}% valores nulos.{recommendation}",
+                    "column": name,
+                    "reason": "high_null_ratio",
                 }
             )
         elif null_pct >= 15:
             alerts.append(
                 {
                     "level": "info",
-                    "message": f"Columna «{col_info['name']}»: {null_pct:.0f}% valores nulos.",
+                    "message": f"Columna «{label}»: {null_pct:.0f}% valores nulos.",
+                    "column": name,
+                    "reason": "medium_null_ratio",
                 }
             )
     if len(numeric) < 2:
@@ -179,6 +213,57 @@ def _quality_alerts(
             }
         )
     return alerts[:12]
+
+
+def _semantic_lookup() -> dict[str, dict[str, Any]]:
+    try:
+        from app.services.conversation.dashboard_spec import SEMANTIC_VARIABLES
+        from app.services.conversation.semantic_dictionary import (
+            get_semantic_dictionary,
+            semantic_key,
+        )
+    except Exception:
+        return {}
+
+    lookup: dict[str, dict[str, Any]] = {}
+    for key, item in get_semantic_dictionary(SEMANTIC_VARIABLES).items():
+        entry = dict(item)
+        for candidate in [key, semantic_key(key), *(item.get("aliases") or [])]:
+            text = str(candidate or "").strip()
+            if not text:
+                continue
+            lookup[text] = entry
+            lookup[semantic_key(text)] = entry
+    return lookup
+
+
+def _semantic_for_column(name: str, lookup: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    if not name:
+        return {}
+    try:
+        from app.services.conversation.semantic_dictionary import semantic_key
+    except Exception:
+        return lookup.get(name) or {}
+    return lookup.get(name) or lookup.get(semantic_key(name)) or {}
+
+
+def _is_core_quality_column(name: str, semantic: dict[str, Any]) -> bool:
+    normalized = _normalize_col(name)
+    label = _normalize_col(semantic.get("label") or "")
+    core_tokens = (
+        "prioridad",
+        "priority",
+        "servicio",
+        "service",
+        "categoria",
+        "category",
+        "estado",
+        "status",
+        "sla",
+        "resolution",
+        "resolucion",
+    )
+    return any(token in normalized or token in label for token in core_tokens)
 
 
 def _correlation_pairs(

@@ -27,6 +27,18 @@ def test_quality_alerts_flags_high_nulls():
     assert any("nulos" in alert["message"].lower() for alert in alerts)
 
 
+def test_quality_alerts_mark_sparse_optional_semantic_metric_as_info():
+    alerts = _quality_alerts(
+        __import__("pandas").DataFrame({"No_of_Related_Incidents": [None] * 99 + [1]}),
+        numeric=["No_of_Related_Incidents"],
+        columns=[{"name": "No_of_Related_Incidents", "null_pct": 99}],
+    )
+    alert = next(item for item in alerts if item.get("column") == "No_of_Related_Incidents")
+    assert alert["level"] == "info"
+    assert alert["reason"] == "low_coverage_optional_variable"
+    assert "No se recomienda" in alert["message"]
+
+
 def test_business_breakdowns_category_sla():
     import pandas as pd
 

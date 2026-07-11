@@ -39,6 +39,11 @@ class TabularColumnProfile:
     excluded_columns: list[str]
     suggested_id_column: str | None
     all_columns: list[str]
+    column_summaries: list[dict]
+
+
+HIGH_NULL_RATIO = 0.45
+HIGH_CARDINALITY_RATIO = 0.55
 
 
 def load_tabular_csv(path, *, n_samples: int | None = None, seed: int = 42) -> pd.DataFrame:
@@ -74,39 +79,183 @@ def profile_dataframe(
     excluded: list[str] = []
     id_candidates: list[str] = []
     n_rows = len(df)
+    column_summaries: list[dict] = []
+
+    def add_column_summary(
+        *,
+        name: str,
+        series: pd.Series,
+        role: str,
+        included: bool,
+        reason: str = "",
+        kind: str = "unknown",
+        can_chart: bool = True,
+        avoid_as_metric: bool = False,
+        avoid_as_dimension: bool = False,
+    ) -> None:
+        non_null_count = int(series.notna().sum())
+        unique_count = int(series.nunique(dropna=True))
+        row_count = max(n_rows, 1)
+        null_ratio = float(series.isna().mean()) if n_rows else 0.0
+        cardinality_ratio = float(unique_count / row_count)
+        high_nulls = null_ratio >= HIGH_NULL_RATIO
+        high_cardinality = (
+            unique_count > MAX_CATEGORICAL_CARDINALITY
+            and cardinality_ratio >= HIGH_CARDINALITY_RATIO
+            and not pd.api.types.is_numeric_dtype(series)
+        )
+        reasons: list[str] = []
+        if reason:
+            reasons.append(reason)
+        if high_nulls:
+            reasons.append("Tiene demasiados valores vacios para una lectura confiable.")
+        if high_cardinality:
+            reasons.append("Tiene demasiados valores distintos para agrupar o graficar bien.")
+
+        useful_for_analysis = bool(included and not high_nulls and not high_cardinality)
+        column_summaries.append(
+            {
+                "name": name,
+                "role": role,
+                "kind": kind,
+                "included_in_analysis": bool(included),
+                "useful_for_analysis": useful_for_analysis,
+                "can_chart": bool(can_chart and included and not high_nulls),
+                "avoid_as_metric": bool(avoid_as_metric),
+                "avoid_as_dimension": bool(avoid_as_dimension),
+                "null_ratio": round(null_ratio, 4),
+                "null_pct": round(null_ratio * 100, 2),
+                "non_null_count": non_null_count,
+                "unique_count": unique_count,
+                "cardinality_ratio": round(cardinality_ratio, 4),
+                "high_nulls": bool(high_nulls),
+                "high_cardinality": bool(high_cardinality),
+                "not_recommended_reason": " ".join(dict.fromkeys(reasons)),
+                "source": "backend_profile",
+            }
+        )
 
     for col in df.columns:
         series = df[col]
         if _is_likely_id(series, n_rows):
             id_candidates.append(col)
             excluded.append(col)
+            add_column_summary(
+                name=col,
+                series=series,
+                role="identifier",
+                kind="identifier",
+                included=False,
+                reason="Identificador tecnico: sirve para trazabilidad, no como metrica.",
+                can_chart=False,
+                avoid_as_metric=True,
+                avoid_as_dimension=True,
+            )
             continue
 
         if col in exclude:
             excluded.append(col)
+            add_column_summary(
+                name=col,
+                series=series,
+                role="excluded",
+                kind="technical",
+                included=False,
+                reason="Variable excluida por reglas de preparacion.",
+                can_chart=False,
+                avoid_as_metric=True,
+                avoid_as_dimension=True,
+            )
             continue
 
         nunique = series.nunique(dropna=False)
         if nunique <= 1:
             excluded.append(col)
+            add_column_summary(
+                name=col,
+                series=series,
+                role="constant",
+                kind="constant",
+                included=False,
+                reason="No aporta variacion suficiente para analizar.",
+                can_chart=False,
+                avoid_as_metric=True,
+                avoid_as_dimension=True,
+            )
             continue
 
         if pd.api.types.is_numeric_dtype(series):
             if col in KNOWN_NUMERIC_COLUMNS:
                 numeric.append(col)
+                add_column_summary(
+                    name=col,
+                    series=series,
+                    role="metric",
+                    kind="numeric",
+                    included=True,
+                    can_chart=True,
+                    avoid_as_dimension=True,
+                )
                 continue
             low_card = nunique <= min(20, max(5, int(0.05 * n_rows)))
             if low_card:
                 categorical.append(col)
+                add_column_summary(
+                    name=col,
+                    series=series,
+                    role="dimension",
+                    kind="numeric_category",
+                    included=True,
+                    can_chart=True,
+                    avoid_as_metric=True,
+                )
             else:
                 numeric.append(col)
+                add_column_summary(
+                    name=col,
+                    series=series,
+                    role="metric",
+                    kind="numeric",
+                    included=True,
+                    can_chart=True,
+                    avoid_as_dimension=True,
+                )
         elif pd.api.types.is_bool_dtype(series):
             categorical.append(col)
+            add_column_summary(
+                name=col,
+                series=series,
+                role="dimension",
+                kind="boolean",
+                included=True,
+                can_chart=True,
+                avoid_as_metric=True,
+            )
         else:
             if nunique <= MAX_CATEGORICAL_CARDINALITY:
                 categorical.append(col)
+                add_column_summary(
+                    name=col,
+                    series=series,
+                    role="dimension",
+                    kind="categorical",
+                    included=True,
+                    can_chart=True,
+                    avoid_as_metric=True,
+                )
             else:
                 excluded.append(col)
+                add_column_summary(
+                    name=col,
+                    series=series,
+                    role="high_cardinality",
+                    kind="categorical",
+                    included=False,
+                    reason="Cardinalidad alta: conviene usarla solo como evidencia o filtro.",
+                    can_chart=False,
+                    avoid_as_metric=True,
+                    avoid_as_dimension=True,
+                )
 
     suggested_id = None
     for preferred in ("_registro_id", "incident_id", "client_id", "id", "record_id", "uuid"):
@@ -122,6 +271,7 @@ def profile_dataframe(
         excluded_columns=excluded,
         suggested_id_column=suggested_id,
         all_columns=list(df.columns),
+        column_summaries=column_summaries,
     )
 
 
