@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from pathlib import Path
-from typing import Any, Literal
+from time import perf_counter
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -39,6 +41,8 @@ from app.services.pipeline.synthetic_data import (
 
 Modality = Literal["texto", "imagen", "multimodal", "it_ops", "tabular"]
 ReductionMethod = Literal["PCA", "t-SNE", "UMAP"]
+ProgressCallback = Callable[[str, int, str], None]
+logger = logging.getLogger(__name__)
 
 
 def _build_legacy_metadata(
@@ -392,6 +396,7 @@ def run_pipeline(
     numeric_columns: list[str] | None = None,
     categorical_columns: list[str] | None = None,
     pipeline_overrides: dict[str, Any] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> PipelineResult:
     effective_seed = (
         seed
@@ -399,67 +404,173 @@ def run_pipeline(
         else seed_for_modality(modality, seed)
     )
     cfg = merge_pipeline_config(load_pipeline_config(), pipeline_overrides)
+    timings: dict[str, float] = {}
+
+    def notify(stage: str, progress: int, message: str) -> None:
+        if not progress_callback:
+            return
+        try:
+            progress_callback(stage, progress, message)
+        except Exception:
+            logger.debug("pipeline_progress_callback_failed", exc_info=True)
+
+    def timed(step: str, callback):
+        started = perf_counter()
+        value = callback()
+        timings[step] = round(perf_counter() - started, 3)
+        return value
 
     if modality == "tabular":
         if not dataset_id or not user_id:
             raise ValueError("dataset_id y usuario son obligatorios para modalidad tabular")
-        meta = get_dataset_meta(dataset_id, user_id=user_id)
-        csv_path = get_dataset_csv_path(dataset_id, user_id=user_id)
-        profile = meta_to_profile(meta)
-        df = load_tabular_csv(csv_path, n_samples=n_samples, seed=effective_seed)
-        num_cols, cat_cols = resolve_feature_columns(
-            profile,
-            numeric_columns=numeric_columns,
-            categorical_columns=categorical_columns,
-            exclude_columns=list(
-                dict.fromkeys([*(exclude_columns or []), *default_exclude_columns()])
+        notify("prepare", 4, "Preparando datos, columnas y parametros del escenario.")
+        meta = timed("metadata_lookup_seconds", lambda: get_dataset_meta(dataset_id, user_id=user_id))
+        csv_path = timed("dataset_path_seconds", lambda: get_dataset_csv_path(dataset_id, user_id=user_id))
+        profile = timed("profile_seconds", lambda: meta_to_profile(meta))
+        df = timed(
+            "load_csv_seconds",
+            lambda: load_tabular_csv(csv_path, n_samples=n_samples, seed=effective_seed),
+        )
+        num_cols, cat_cols = timed(
+            "resolve_columns_seconds",
+            lambda: resolve_feature_columns(
+                profile,
+                numeric_columns=numeric_columns,
+                categorical_columns=categorical_columns,
+                exclude_columns=list(
+                    dict.fromkeys([*(exclude_columns or []), *default_exclude_columns()])
+                ),
             ),
         )
-        X, _ = dataframe_to_features_generic(df, num_cols, cat_cols)
-        X_2d, pca_variance = reduce_2d(X, reduction_method, effective_seed, config=cfg)
-        labels_hdb = cluster_hdbscan(X_2d, config=cfg)
+        notify(
+            "features",
+            20,
+            "Construyendo variables analiticas para comparar incidencias.",
+        )
+        X, _ = timed(
+            "feature_build_seconds",
+            lambda: dataframe_to_features_generic(df, num_cols, cat_cols),
+        )
+        notify(
+            "reduction",
+            40,
+            f"Aplicando {reduction_method} y preparando coordenadas visuales.",
+        )
+        X_2d, pca_variance = timed(
+            "reduction_seconds",
+            lambda: reduce_2d(X, reduction_method, effective_seed, config=cfg),
+        )
+        notify("clustering", 62, "Agrupando incidencias por similitud.")
+        labels_hdb = timed("clustering_seconds", lambda: cluster_hdbscan(X_2d, config=cfg))
         id_col = id_column or profile.suggested_id_column
-        metadata = _build_tabular_metadata(
-            df,
-            labels_hdb,
-            id_col,
-            feature_columns=[*num_cols, *cat_cols],
+        notify(
+            "metrics",
+            76,
+            "Calculando metricas, perfiles y evidencias resumidas.",
         )
-        return _build_pipeline_result(
-            X_scaled=X,
-            X_2d=X_2d,
-            X_hi=X,
-            cfg=cfg,
-            df=df,
-            n_samples=len(df),
-            metadata=metadata,
-            labels_hdb=labels_hdb,
-            pca_variance=pca_variance,
-            tuning_overrides=pipeline_overrides,
+        metadata = timed(
+            "metadata_build_seconds",
+            lambda: _build_tabular_metadata(
+                df,
+                labels_hdb,
+                id_col,
+                feature_columns=[*num_cols, *cat_cols],
+            ),
         )
+        notify("metrics", 82, "Calculando metricas finales y baseline de comparacion.")
+        result = timed(
+            "result_build_seconds",
+            lambda: _build_pipeline_result(
+                X_scaled=X,
+                X_2d=X_2d,
+                X_hi=X,
+                cfg=cfg,
+                df=df,
+                n_samples=len(df),
+                metadata=metadata,
+                labels_hdb=labels_hdb,
+                pca_variance=pca_variance,
+                tuning_overrides=pipeline_overrides,
+            ),
+        )
+        logger.info(
+            "pipeline_internal_timing modality=tabular dataset_id=%s rows=%s timings=%s",
+            dataset_id,
+            len(df),
+            timings,
+        )
+        return result
         
 
     if modality == "it_ops":
-        df = load_it_ops_dataframe(
-            dataset_path,
-            n_samples=n_samples,
-            seed=effective_seed,
+        notify("prepare", 4, "Preparando dataset IT Ops.")
+        df = timed(
+            "load_it_ops_seconds",
+            lambda: load_it_ops_dataframe(
+                dataset_path,
+                n_samples=n_samples,
+                seed=effective_seed,
+            ),
         )
-        X, _, _meta, _groups = dataframe_to_features(df)
-        X_scaled = scale_features(X)
-        
+        notify("features", 20, "Construyendo variables operativas.")
+        X, _, _meta, _groups = timed("feature_build_seconds", lambda: dataframe_to_features(df))
+        X_scaled = timed("scale_features_seconds", lambda: scale_features(X))
+        notify(
+            "reduction",
+            40,
+            f"Aplicando {reduction_method} y preparando coordenadas visuales.",
+        )
+        X_2d, pca_variance = timed(
+            "reduction_seconds",
+            lambda: reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg),
+        )
+        notify("clustering", 62, "Agrupando incidencias por similitud.")
+        labels_hdb = timed("clustering_seconds", lambda: cluster_hdbscan(X_2d, config=cfg))
+        notify("metrics", 76, "Calculando metricas, perfiles y evidencias resumidas.")
+        metadata = timed("metadata_build_seconds", lambda: _build_it_ops_metadata(df, labels_hdb))
+        notify("metrics", 82, "Calculando metricas finales y baseline de comparacion.")
+        result = timed(
+            "result_build_seconds",
+            lambda: _build_pipeline_result(
+                X_scaled=X_scaled,
+                X_2d=X_2d,
+                X_hi=X_scaled,
+                cfg=cfg,
+                df=df,
+                n_samples=len(df),
+                metadata=metadata,
+                labels_hdb=labels_hdb,
+                pca_variance=pca_variance,
+                tuning_overrides=pipeline_overrides,
+            ),
+        )
+        logger.info(
+            "pipeline_internal_timing modality=it_ops rows=%s timings=%s",
+            len(df),
+            timings,
+        )
+        return result
 
     effective_seed = seed_for_modality(modality, seed)
     legacy_n_samples = n_samples if n_samples is not None else 2000
+    notify("prepare", 4, "Preparando datos sinteticos del escenario.")
     X, true_labels, _ = generate_high_dim_features(
         n_samples=legacy_n_samples,
         n_features=n_features,
         n_clusters=n_true_clusters,
         seed=effective_seed,
     )
+    notify("features", 20, "Construyendo variables sinteticas.")
     X_scaled = scale_features(X)
+    notify(
+        "reduction",
+        40,
+        f"Aplicando {reduction_method} y preparando coordenadas visuales.",
+    )
     X_2d, pca_variance = reduce_2d(X_scaled, reduction_method, effective_seed, config=cfg)
+    notify("clustering", 62, "Agrupando incidencias por similitud.")
     labels_hdb = cluster_hdbscan(X_2d, config=cfg)
+    notify("metrics", 76, "Calculando metricas y evidencias resumidas.")
     metadata = _build_legacy_metadata(
             true_labels, labels_hdb, modality, effective_seed
         )

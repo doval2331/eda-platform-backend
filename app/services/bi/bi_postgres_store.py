@@ -1,5 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +12,8 @@ from sqlalchemy.engine import Connection, Engine
 from app.config import get_settings
 from app.services.bi.metabase_embed import embedding_is_configured
 from app.services.runs.duckdb_store import _connect, init_duckdb
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -201,6 +205,13 @@ def init_bi_schema(engine: Engine | None = None) -> None:
             filter_kind TEXT,
             filter_value TEXT,
             selected_at TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bi_active_run (
+            active_key TEXT PRIMARY KEY,
+            run_id TEXT,
+            published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """,
     ]
@@ -484,30 +495,24 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
             tables={},
         )
 
+    started_at = time.perf_counter()
     engine = _engine()
     init_bi_schema(engine)
     frames = _load_bi_frames(run_id=run_id)
+    load_seconds = time.perf_counter() - started_at
 
     with engine.begin() as con:
-        if run_id:
-            for table in (
-                "bi_selected_insights",
-                "bi_service_risk",
-                "bi_sla_by_category",
-                "bi_cluster_summary",
-                "bi_evidences",
-                "bi_runs",
-            ):
+        for table in (
+            "bi_selected_insights",
+            "bi_service_risk",
+            "bi_sla_by_category",
+            "bi_cluster_summary",
+            "bi_evidences",
+            "bi_runs",
+        ):
+            if run_id:
                 con.execute(text(f"DELETE FROM {table} WHERE run_id = :run_id"), {"run_id": run_id})
-        else:
-            for table in (
-                "bi_selected_insights",
-                "bi_service_risk",
-                "bi_sla_by_category",
-                "bi_cluster_summary",
-                "bi_evidences",
-                "bi_runs",
-            ):
+            else:
                 con.execute(text(f"DELETE FROM {table}"))
 
         counts: dict[str, int] = {}
@@ -524,9 +529,50 @@ def sync_bi_tables(run_id: str | None = None, *, force: bool = False) -> BiSyncR
                     chunksize=_bi_insert_chunksize(df),
                 )
 
+        active_run_id = run_id
+        if not active_run_id:
+            active_run_id = con.execute(
+                text(
+                    """
+                    SELECT run_id
+                    FROM bi_runs
+                    ORDER BY created_at DESC NULLS LAST, run_id DESC
+                    LIMIT 1
+                    """
+                )
+            ).scalar()
+        if active_run_id:
+            con.execute(
+                text(
+                    """
+                    INSERT INTO bi_active_run(active_key, run_id, published_at)
+                    VALUES ('metabase_report', :run_id, CURRENT_TIMESTAMP)
+                    ON CONFLICT (active_key)
+                    DO UPDATE SET
+                        run_id = EXCLUDED.run_id,
+                        published_at = EXCLUDED.published_at
+                    """
+                ),
+                {"run_id": active_run_id},
+            )
+
+    total_seconds = time.perf_counter() - started_at
+    logger.info(
+        "bi_sync completed run_id=%s load_seconds=%.2f total_seconds=%.2f counts=%s",
+        run_id or "all",
+        load_seconds,
+        total_seconds,
+        counts,
+    )
+
     return BiSyncResult(
         status="ok",
-        message="Tablas BI sincronizadas en PostgreSQL para Metabase.",
+        message=(
+            "Tablas BI sincronizadas en PostgreSQL para Metabase "
+            f"con la ejecucion {run_id}."
+            if run_id
+            else "Tablas BI sincronizadas en PostgreSQL para Metabase."
+        ),
         tables=counts,
     )
 

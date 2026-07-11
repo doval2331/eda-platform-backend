@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import unicodedata
@@ -1778,6 +1779,131 @@ def _unmatched_message_answer() -> str:
     )
 
 
+def _extract_dashboard_context(question: str) -> dict | None:
+    match = re.search(
+        r"DASHBOARD_CONTEXT_JSON:\s*(\{.*?\})\s*:END_DASHBOARD_CONTEXT",
+        question,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _strip_dashboard_context(question: str) -> str:
+    cleaned = re.sub(
+        r"DASHBOARD_CONTEXT_JSON:\s*\{.*?\}\s*:END_DASHBOARD_CONTEXT",
+        "",
+        question,
+        flags=re.DOTALL,
+    ).strip()
+    return cleaned or question
+
+
+def _dashboard_context_answer(
+    context: dict,
+    df: pd.DataFrame,
+    run_context: dict | None,
+) -> tuple[str, list[InsightCandidate]]:
+    action = str(context.get("action_label") or context.get("intent") or "seleccion del dashboard")
+    intent = str(context.get("intent") or "analizar la seleccion")
+    evidence = str(context.get("evidence") or context.get("evidence_used") or "sin evidencia especifica")
+    question = str(context.get("suggested_question") or context.get("question_answered") or "")
+    visualization = context.get("visualization") if isinstance(context.get("visualization"), dict) else {}
+    finding = context.get("finding") if isinstance(context.get("finding"), dict) else {}
+    recommendation = context.get("recommendation") if isinstance(context.get("recommendation"), dict) else {}
+    params = context.get("parameters") if isinstance(context.get("parameters"), dict) else {}
+    chart_data = context.get("chart_data") if isinstance(context.get("chart_data"), dict) else {}
+    selected_ticket = context.get("selected_ticket") if isinstance(context.get("selected_ticket"), dict) else {}
+    selected_segment = str(context.get("selected_segment") or "")
+    operation = context.get("operation") if isinstance(context.get("operation"), dict) else {}
+    drilldown_tickets = context.get("drilldown_tickets") if isinstance(context.get("drilldown_tickets"), list) else []
+    drilldown_count = int(context.get("drilldown_count") or len(drilldown_tickets))
+    drilldown_ticket_ids = context.get("drilldown_ticket_ids") if isinstance(context.get("drilldown_ticket_ids"), list) else []
+    focus_instruction = str(context.get("focus_instruction") or "")
+    source_name = ""
+    if run_context:
+        source_name = str(run_context.get("source_name") or run_context.get("project_name") or "")
+    parts = [
+        f"Accion seleccionada: {action}.",
+        f"Objetivo: {intent}.",
+        f"Contexto usado: {len(df)} registros materializados",
+    ]
+    if source_name:
+        parts[-1] += f" de {source_name}"
+    parts[-1] += "."
+    if finding.get("title"):
+        parts.append(f"Hallazgo incluido: {finding.get('title')}.")
+    if visualization.get("title"):
+        parts.append(
+            "Visualizacion considerada: "
+            f"{visualization.get('title')} ({visualization.get('chart_type') or 'sin tipo'})."
+        )
+    if chart_data.get("title"):
+        total = chart_data.get("total_records") or 0
+        parts.append(
+            "Datos del grafico: "
+            f"{chart_data.get('title')} con {total} registros agregados."
+        )
+    if selected_segment:
+        parts.append(f"Segmento seleccionado: {selected_segment}.")
+    if operation:
+        op_ticket_count = operation.get("ticket_count") or drilldown_count or len(drilldown_tickets)
+        op_action = operation.get("action") or operation.get("intent") or "revision operativa"
+        op_recommended = str(operation.get("recommended_action") or "").strip()
+        op_saved = bool(operation.get("saved"))
+        parts.append(
+            f"Seleccion operativa: {op_ticket_count} tickets para {op_action}; "
+            f"{'ya fue guardada' if op_saved else 'aun no esta guardada'} como evidencia operacional."
+        )
+        if op_recommended:
+            parts.append(f"Accion recomendada por validacion del grafico: {op_recommended[:420]}.")
+    if selected_ticket:
+        ticket = selected_ticket.get("ticket") or selected_ticket.get("title") or "ticket seleccionado"
+        service = selected_ticket.get("service") or "sin servicio informado"
+        priority = selected_ticket.get("priority") or "sin prioridad informada"
+        parts.append(f"Ticket seleccionado: {ticket}; servicio: {service}; prioridad: {priority}.")
+    if drilldown_tickets:
+        tickets = [
+            str(item.get("ticket") or item.get("title") or "ticket")
+            for item in drilldown_tickets[:8]
+            if isinstance(item, dict)
+        ]
+        parts.append(
+            "Tickets incluidos en el drill-down: "
+            f"{', '.join(tickets) if tickets else len(drilldown_tickets)}."
+        )
+    if drilldown_count:
+        ids = [str(item) for item in drilldown_ticket_ids[:12] if item]
+        parts.append(
+            f"Cantidad total seleccionada para el agente: {drilldown_count}. "
+            f"IDs principales: {', '.join(ids) if ids else 'no informados'}."
+        )
+    if recommendation.get("title"):
+        parts.append(f"Recomendacion considerada: {recommendation.get('title')}.")
+    if params:
+        compact_params = ", ".join(
+            f"{key}={value}" for key, value in params.items() if value not in (None, "", [])
+        )
+        if compact_params:
+            parts.append(f"Parametros considerados: {compact_params[:280]}.")
+    if evidence:
+        parts.append(f"Evidencia resumida: {evidence[:500]}.")
+    if question:
+        parts.append(f"Pregunta que debe responder: {question}.")
+    if focus_instruction:
+        parts.append(f"Instruccion de foco: {focus_instruction}")
+    parts.append(
+        "Responde usando este contexto y entrega una lectura accionable con evidencia, "
+        "valor para el usuario y siguiente paso recomendado."
+    )
+    return " ".join(parts), []
+
+
 def build_chat_response(
     run_id: str,
     question: str,
@@ -1793,7 +1919,9 @@ def build_chat_response(
             suggested_questions=FALLBACK_SUGGESTED_QUESTIONS,
         )
 
-    normalized = _normalize(question)
+    dashboard_context = _extract_dashboard_context(question)
+    effective_question = _strip_dashboard_context(question)
+    normalized = _normalize(effective_question)
     suggested_questions = _suggested_questions_for_df(df, run_context=run_context)
     answer_parts: list[str] = []
     insights: list[InsightCandidate] = []
@@ -1809,7 +1937,7 @@ def build_chat_response(
     def has_any(*terms: str) -> bool:
         return any(term in normalized for term in terms)
 
-    asks_dashboard = "dashboard" in normalized or (
+    asks_dashboard = bool(dashboard_context) or "dashboard" in normalized or (
         "hallazgo" in normalized
         and any(term in normalized for term in ["llevar", "agregar", "mostrar", "conviene"])
     )
@@ -1956,6 +2084,9 @@ def build_chat_response(
     if asks_next_steps:
         collect("guia_proximos_pasos", _next_steps_answer(df, run_context))
 
+    if dashboard_context and not answer_parts:
+        collect("contexto_dashboard", _dashboard_context_answer(dashboard_context, df, run_context))
+
     if not answer_parts and (asks_overview or has_any("que puedo", "analizar", "explorar", "resumen")):
         collect("resumen_general", _overview(df))
     elif not answer_parts:
@@ -1970,11 +2101,12 @@ def build_chat_response(
 
     fallback_answer = " ".join(answer_parts)
     llm_result = explain_with_llm(
-        question=question,
+        question=effective_question,
         tool_summaries=tool_summaries,
         fallback_answer=fallback_answer,
         conversation_history=history,
         document_context=document_context,
+        dashboard_context=dashboard_context,
     )
 
     return ChatResponse(

@@ -103,6 +103,7 @@ def _persist_dataframe_dataset(
         "excluded_columns": profile.excluded_columns,
         "suggested_id_column": profile.suggested_id_column,
         "all_columns": profile.all_columns,
+        "column_summaries": profile.column_summaries,
         "ingestion_metadata": ingestion_metadata or {},
     }
     _meta_path(dataset_id).write_text(
@@ -317,4 +318,5 @@ def meta_to_profile(meta: dict) -> TabularColumnProfile:
         excluded_columns=list(meta.get("excluded_columns", [])),
         suggested_id_column=meta.get("suggested_id_column"),
         all_columns=list(meta["all_columns"]),
+        column_summaries=list(meta.get("column_summaries", [])),
     )

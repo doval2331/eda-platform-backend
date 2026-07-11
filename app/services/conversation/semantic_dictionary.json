@@ -1,0 +1,437 @@
+{
+  "variables": [
+    {
+      "name": "no_of_reassignments",
+      "aliases": [
+        "No_of_Reassignments",
+        "No Of Reassignments",
+        "No of Reassignments",
+        "number_of_reassignments",
+        "reassignments",
+        "num_reassignments",
+        "task.reassignment_count",
+        "reassignment_count"
+      ],
+      "label": "Cantidad de reasignaciones",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Numero de veces que una incidencia fue reasignada entre equipos o responsables.",
+      "recommended_use": "Usala para detectar complejidad operativa, friccion de soporte o mala derivacion inicial."
+    },
+    {
+      "name": "ci_cat",
+      "aliases": ["CI_Cat", "CI Cat", "configuration_item_category", "ci_category", "categoria", "Nombre"],
+      "label": "Categoria CI",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Categoria del elemento de configuracion o aplicacion relacionada.",
+      "recommended_use": "Usala como eje funcional para traducir patrones tecnicos a familias de servicio."
+    },
+    {
+      "name": "ci_subcat",
+      "aliases": [
+        "CI_Subcat",
+        "CI Subcat",
+        "configuration_item_subcategory",
+        "ci_subcategory",
+        "subcategoria",
+        "subcategoria_ci",
+        "Subcategoría",
+        "Subcategoria",
+        "Módulo de Subcategoría",
+        "Modulo de Subcategoria"
+      ],
+      "label": "Subcategoria CI",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Subcategoria del elemento de configuracion, aplicacion o componente asociado a la incidencia.",
+      "recommended_use": "Usala para detectar familias tecnicas o funcionales con mayor volumen, SLA o reasignaciones."
+    },
+    {
+      "name": "affected_service",
+      "aliases": [
+        "Affected Service",
+        "Affected_Service",
+        "servicio_afectado",
+        "service_affected",
+        "business_service",
+        "Business Service",
+        "task.business_service",
+        "task.service_offering",
+        "service_offering",
+        "Elemento de configuración",
+        "Elemento de configuracion"
+      ],
+      "label": "Servicio afectado",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Servicio o aplicacion impactada por la incidencia.",
+      "recommended_use": "Usala como eje o filtro para identificar focos operativos."
+    },
+    {
+      "name": "priority",
+      "aliases": ["Priority", "prioridad", "Prioridad", "severity", "task.priority"],
+      "label": "Prioridad",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Nivel de prioridad, urgencia o severidad de la incidencia.",
+      "recommended_use": "Usala para priorizar atencion y comparar volumen de casos criticos."
+    },
+    {
+      "name": "status",
+      "aliases": ["Status", "estado", "Estado", "state", "ticket_status", "task.state", "stage", "Estado de la incidencia", "Valor"],
+      "label": "Estado del ticket",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Estado operativo actual o final del ticket.",
+      "recommended_use": "Usala para diferenciar tickets abiertos, cerrados, pendientes o escalados."
+    },
+    {
+      "name": "assignment_group",
+      "aliases": [
+        "Assignment_Group",
+        "assignment group",
+        "grupo_asignado",
+        "Grupo de asignación",
+        "Grupo de asignacion",
+        "assigned_group",
+        "support_group",
+        "task.assignment_group"
+      ],
+      "label": "Grupo asignado",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Equipo o grupo responsable de atender la incidencia.",
+      "recommended_use": "Usala para detectar concentracion operativa o reasignaciones entre equipos."
+    },
+    {
+      "name": "business_impact_score",
+      "aliases": ["business_impact_score", "Business Impact", "impact_score", "impacto_negocio", "business_impact"],
+      "label": "Impacto de negocio",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Estimacion numerica del impacto que la incidencia puede tener en el negocio o servicio.",
+      "recommended_use": "Usala para priorizar tickets o servicios con mayor impacto operativo."
+    },
+    {
+      "name": "urgency_score",
+      "aliases": ["urgency_score", "Urgency", "urgencia", "Urgencia", "urgency"],
+      "label": "Urgencia",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Nivel de urgencia o presion temporal asociada a una incidencia.",
+      "recommended_use": "Usala para separar casos que requieren atencion inmediata de los que pueden planificarse."
+    },
+    {
+      "name": "avg_resolution_hours",
+      "aliases": [
+        "avg_resolution_hours",
+        "resolution_hours",
+        "tiempo_resolucion_horas",
+        "Duration",
+        "duracion",
+        "Handle_Time_hrs",
+        "handle_time_hrs",
+        "task.business_duration",
+        "business_duration",
+        "task.calendar_duration",
+        "calendar_duration",
+        "task.time_worked",
+        "time_worked"
+        ,"Duración",
+        "Duracion",
+        "Tiempo de trabajo"
+      ],
+      "label": "Tiempo promedio de resolucion",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Tiempo transcurrido hasta resolver la incidencia.",
+      "recommended_use": "Usala como metrica para detectar servicios o categorias con mayor demora."
+    },
+    {
+      "name": "opened_at",
+      "aliases": ["Opened At", "opened_at", "fecha_apertura", "created_at", "created", "Open_Time", "task.opened_at", "task.sys_created_on"],
+      "label": "Fecha de apertura",
+      "role": "business",
+      "type": "datetime",
+      "can_chart": true,
+      "description": "Fecha o momento en que se abrio el ticket.",
+      "recommended_use": "Usala para analizar tendencias temporales, picos o estacionalidad de incidencias."
+    },
+    {
+      "name": "closed_at",
+      "aliases": ["Closed At", "closed_at", "fecha_cierre", "resolved_at", "resolution_date", "Resolved_Time", "Close_Time", "task.closed_at"],
+      "label": "Fecha de cierre",
+      "role": "business",
+      "type": "datetime",
+      "can_chart": true,
+      "description": "Fecha o momento en que se cerro o resolvio el ticket.",
+      "recommended_use": "Usala para comparar tiempos de resolucion y validar periodos de cierre."
+    },
+    {
+      "name": "sla_breach_rate",
+      "aliases": ["sla_breach_rate", "sla_incumplido", "sla_breached", "SLA Breach", "sla"],
+      "label": "Incumplimiento de SLA",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Indicador o tasa de incumplimiento de acuerdos de servicio.",
+      "recommended_use": "Usala para identificar focos de riesgo contractual u operativo."
+    },
+    {
+      "name": "customer_satisfaction",
+      "aliases": ["customer_satisfaction", "satisfaccion_usuario", "satisfaction", "user_satisfaction"],
+      "label": "Satisfaccion del usuario",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Indicador de satisfaccion o percepcion del usuario.",
+      "recommended_use": "Usala para evaluar impacto funcional de incidentes o servicios."
+    },
+    {
+      "name": "reopen_count",
+      "aliases": ["reopen_count", "reopened_count", "reaperturas", "reopened", "Volver a abrir recuento"],
+      "label": "Cantidad de reaperturas",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Cantidad de veces que un ticket fue reabierto despues de considerarse resuelto.",
+      "recommended_use": "Usala para detectar calidad de resolucion, retrabajo o cierres prematuros."
+    },
+    {
+      "name": "escalation_count",
+      "aliases": ["escalation_count", "escalations", "escalados", "escalation"],
+      "label": "Cantidad de escalados",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Cantidad de escalados o derivaciones a niveles superiores de soporte.",
+      "recommended_use": "Usala para detectar complejidad, dependencia de expertos o cuellos de botella."
+    },
+    {
+      "name": "channel",
+      "aliases": ["channel", "canal", "contact_type", "entry_channel", "task.contact_type", "Tipo de contacto"],
+      "label": "Canal de ingreso",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Canal por el que ingreso la incidencia o solicitud.",
+      "recommended_use": "Usala para detectar canales con mayor volumen, demora o concentracion de problemas."
+    },
+    {
+      "name": "root_cause",
+      "aliases": ["root_cause", "causa_raiz", "causa_raiz_simulada", "cause", "Diagnóstico", "Diagnostico", "Causada por Cambio"],
+      "label": "Causa raiz",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Causa probable o clasificada del incidente.",
+      "recommended_use": "Usala para enfocar acciones preventivas."
+    },
+    {
+      "name": "impact",
+      "aliases": ["Impact", "impacto", "Impacto", "impact_level", "business_impact_level", "task.impact"],
+      "label": "Impacto",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Nivel cualitativo de impacto declarado para la incidencia.",
+      "recommended_use": "Usalo para priorizar casos que afectan servicios o usuarios de mayor criticidad."
+    },
+    {
+      "name": "urgency",
+      "aliases": ["Urgency", "urgencia", "Urgencia", "urgency_level", "task.urgency"],
+      "label": "Urgencia",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Nivel cualitativo de urgencia de la incidencia.",
+      "recommended_use": "Usala para separar casos que requieren atencion inmediata de los que pueden planificarse."
+    },
+    {
+      "name": "resolver_group",
+      "aliases": ["Resolver_Group", "resolver group", "resolution_group", "grupo_resolutor"],
+      "label": "Grupo resolutor",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Equipo que resolvio o cerro la incidencia.",
+      "recommended_use": "Usalo para detectar carga operativa, cuellos de botella y especializacion de soporte."
+    },
+    {
+      "name": "assigned_to",
+      "aliases": ["Assigned_To", "assigned to", "assignee", "responsable"],
+      "label": "Responsable asignado",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Persona o grupo responsable de atender el ticket.",
+      "recommended_use": "Usalo para trazabilidad operativa o para revisar concentracion de asignaciones."
+    },
+    {
+      "name": "close_code",
+      "aliases": [
+        "Close_Code",
+        "Closure_Code",
+        "close code",
+        "closure code",
+        "resolution_code",
+        "codigo_cierre",
+        "Código de resolución",
+        "Codigo de resolucion",
+        "Tipo de Solución",
+        "Tipo de Solucion",
+        "task.close_code"
+      ],
+      "label": "Codigo de cierre",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Clasificacion usada al cerrar o resolver el ticket.",
+      "recommended_use": "Usalo para detectar patrones de resolucion, causas recurrentes o cierres repetidos."
+    },
+    {
+      "name": "category",
+      "aliases": ["Category", "categoria", "Catálogo", "Catalogo", "Catálogo.1", "Catalogo.1", "Catálogo.2", "Catalogo.2", "task.u_task_category", "ticket_category"],
+      "label": "Categoria",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Categoria funcional o tecnica declarada para la incidencia.",
+      "recommended_use": "Usala para comparar volumen, prioridad, SLA o reasignaciones por tipo de caso."
+    },
+    {
+      "name": "company",
+      "aliases": ["Company", "company", "Empresa", "Empresa.1", "task.company", "cliente", "organizacion"],
+      "label": "Cliente u organizacion",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Cliente, compania u organizacion asociada a la incidencia.",
+      "recommended_use": "Usala para comparar concentracion de incidencias por cliente o unidad."
+    },
+    {
+      "name": "related_interactions_count",
+      "aliases": ["No_of_Related_Interactions", "related_interactions", "interacciones_relacionadas"],
+      "label": "Interacciones relacionadas",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Cantidad de interacciones relacionadas con la incidencia.",
+      "recommended_use": "Usala para detectar casos con mayor volumen de seguimiento o friccion operativa."
+    },
+    {
+      "name": "related_incidents_count",
+      "aliases": ["No_of_Related_Incidents", "related_incidents", "incidentes_relacionados"],
+      "label": "Incidentes relacionados",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Cantidad de incidentes relacionados con el ticket.",
+      "recommended_use": "Usala para encontrar problemas recurrentes o tickets conectados."
+    },
+    {
+      "name": "related_changes_count",
+      "aliases": ["No_of_Related_Changes", "related_changes", "cambios_relacionados"],
+      "label": "Cambios relacionados",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Cantidad de cambios relacionados con la incidencia.",
+      "recommended_use": "Usala para detectar incidencias posiblemente vinculadas a cambios o despliegues."
+    },
+    {
+      "name": "number_cnt",
+      "aliases": ["number_cnt", "count_score", "normalized_count"],
+      "label": "Puntaje normalizado",
+      "role": "metric",
+      "type": "numeric",
+      "can_chart": true,
+      "description": "Valor numerico normalizado disponible en el dataset original.",
+      "recommended_use": "Usalo solo como metrica auxiliar si no hay una metrica operativa mas interpretable."
+    },
+    {
+      "name": "environment",
+      "aliases": ["Environment", "ambiente", "env", "entorno"],
+      "label": "Ambiente",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Ambiente afectado por la incidencia, como produccion, pruebas o desarrollo.",
+      "recommended_use": "Usalo para separar problemas de produccion de eventos no productivos."
+    },
+    {
+      "name": "location",
+      "aliases": ["Location", "ubicacion", "site", "sede"],
+      "label": "Ubicacion",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Ubicacion, sede o region asociada al ticket.",
+      "recommended_use": "Usala para detectar concentraciones geograficas o sedes con mayor volumen operativo."
+    },
+    {
+      "name": "service_offering",
+      "aliases": ["Service_Offering", "service offering", "oferta_servicio"],
+      "label": "Oferta de servicio",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Oferta o subservicio impactado por la incidencia.",
+      "recommended_use": "Usala para traducir incidencias a dominios funcionales de servicio."
+    },
+    {
+      "name": "opened_by",
+      "aliases": ["Opened_By", "opened by", "reported_by", "solicitante", "Solicitante", "Abierto por"],
+      "label": "Solicitante",
+      "role": "business",
+      "type": "categorical",
+      "can_chart": true,
+      "description": "Usuario, area o rol que abrio o reporto la incidencia.",
+      "recommended_use": "Usalo con cuidado para analisis agregado, evitando exponer datos personales innecesarios."
+    },
+    {
+      "name": "incident_id",
+      "aliases": ["incident_id", "ticket_id", "number", "Número", "Numero", "Nro", "incident_number"],
+      "label": "Identificador de ticket",
+      "role": "identifier",
+      "type": "identifier",
+      "can_chart": false,
+      "avoid_as_metric": true,
+      "description": "Identificador unico del ticket o incidencia.",
+      "recommended_use": "Usalo para drill-down, trazabilidad y analisis puntual con el agente."
+    },
+    {
+      "name": "cluster_label",
+      "aliases": ["cluster", "grupo", "grupo_tecnico"],
+      "label": "Grupo tecnico",
+      "role": "technical",
+      "type": "identifier",
+      "can_chart": true,
+      "avoid_as_metric": true,
+      "description": "Identificador del cluster creado por el algoritmo.",
+      "recommended_use": "Usalo para trazabilidad y drill-down, no como metrica funcional principal."
+    },
+    {
+      "name": "preview",
+      "aliases": ["descripcion", "descripcion_corta", "short_description"],
+      "label": "Descripcion del ticket",
+      "role": "identifier",
+      "type": "text",
+      "can_chart": false,
+      "avoid_as_metric": true,
+      "description": "Texto descriptivo de la evidencia o ticket.",
+      "recommended_use": "Usalo para revisar tickets en drill-down o para contexto del chat, no como eje de graficos."
+    }
+  ]
+}

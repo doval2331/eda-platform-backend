@@ -1,19 +1,29 @@
 import json
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from time import perf_counter
+from typing import Annotated, Any
 
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.api.deps import get_current_user
 from app.config import get_settings
-from app.db import AnalysisRun, SessionLocal, User, get_db, run_to_detail, save_run
+from app.db import (
+    AnalysisRun,
+    SessionLocal,
+    User,
+    compact_pipeline_result_for_storage,
+    get_db,
+    run_to_detail,
+    save_run,
+)
 from app.schemas import (
     AgentHumanDecisionRequest,
     AgentHumanDecisionResponse,
@@ -28,6 +38,8 @@ from app.schemas import (
     ChatHistoryResponse,
     ChatMessageRecord,
     ChatSuggestionsResponse,
+    ConversationChartDataRequest,
+    ConversationChartDataResponse,
     ConversationDashboardResponse,
     DatasetProfileResponse,
     HealthResponse,
@@ -52,6 +64,7 @@ from app.schemas import (
     RunDetail,
     RunResetResponse,
     RunSummary,
+    SelectedInsightsResponse,
 )
 from app.services.datasets.dataset_store import get_dataset_meta, save_upload, uploads_dir
 from app.services.datasets.dataset_profile import (
@@ -60,6 +73,19 @@ from app.services.datasets.dataset_profile import (
     build_dataset_profile_html,
 )
 from app.services.conversation.conversation import build_chat_response, build_suggested_questions_for_run
+from app.services.conversation.chart_data import (
+    build_conversation_chart_data,
+    build_conversation_chart_error_response,
+)
+from app.services.conversation.dashboard_spec import SEMANTIC_VARIABLES, build_dashboard_spec
+from app.services.conversation.semantic_dictionary import (
+    get_semantic_dictionary,
+    load_configured_semantic_variables,
+    reload_semantic_dictionary,
+    save_configured_semantic_variables,
+    semantic_dictionary_status,
+    semantic_dictionary_path,
+)
 from app.services.conversation.chat_history import load_history, persist_exchange, persist_note
 from app.services.runs.duckdb_store import (
     append_agent_decisions,
@@ -113,10 +139,14 @@ from app.services.projects.source_relationship import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 _upload_jobs: dict[str, dict] = {}
 _upload_jobs_lock = threading.Lock()
+_analysis_jobs: dict[str, dict] = {}
+_analysis_jobs_lock = threading.Lock()
+_analysis_job_local = threading.local()
 
 
 def _utc_now_iso() -> str:
@@ -151,6 +181,43 @@ def _public_upload_job(job: dict) -> ProjectSourceUploadJobResponse:
         project=job.get("project"),
     )
 
+def _set_analysis_job(job_id: str, **changes) -> dict:
+    with _analysis_jobs_lock:
+        job = _analysis_jobs.setdefault(job_id, {"job_id": job_id})
+        job.update(changes)
+        job["updated_at"] = _utc_now_iso()
+        return dict(job)
+
+
+def _get_analysis_job(job_id: str) -> dict | None:
+    with _analysis_jobs_lock:
+        job = _analysis_jobs.get(job_id)
+        return dict(job) if job else None
+
+
+def _public_analysis_job(job: dict) -> dict:
+    public = dict(job)
+    public.pop("user_id", None)
+    return public
+
+
+def _notify_analysis_progress(stage: str, progress: int, message: str) -> None:
+    job_id = getattr(_analysis_job_local, "job_id", None)
+    if not job_id:
+        return
+    base = float(getattr(_analysis_job_local, "progress_base", 0) or 0)
+    span = float(getattr(_analysis_job_local, "progress_span", 100) or 100)
+    context = str(getattr(_analysis_job_local, "progress_context", "") or "")
+    scaled_progress = base + (max(0, min(100, int(progress))) / 100) * span
+    current = _get_analysis_job(job_id) or {}
+    next_progress = max(int(current.get("progress") or 0), int(scaled_progress))
+    _set_analysis_job(
+        job_id,
+        status="processing",
+        stage=stage,
+        progress=max(0, min(99, next_progress)),
+        message=f"{context}{message}",
+    )
 
 async def _stream_upload_to_temp(file: UploadFile, filename: str, job_id: str) -> tuple[Path, int]:
     incoming_dir = uploads_dir() / "_incoming"
@@ -169,7 +236,7 @@ async def _stream_upload_to_temp(file: UploadFile, filename: str, job_id: str) -
                 if uploaded > max_bytes:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"El archivo supera el límite de {max_bytes // (1024 * 1024)} MB",
+                        detail=f"El archivo supera el limite de {max_bytes // (1024 * 1024)} MB",
                     )
                 dest.write(chunk)
     except Exception:
@@ -275,6 +342,19 @@ def _metrics_from_row(row: AnalysisRun) -> PipelineMetrics:
     return PipelineMetrics.model_validate(_metrics_from_payload(row))
 
 
+def _metrics_from_summary_row(row: AnalysisRun) -> PipelineMetrics:
+    metrics: dict = {}
+    if row.silhouette is not None:
+        metrics["silhouette"] = float(row.silhouette)
+    if row.davies_bouldin is not None:
+        metrics["davies_bouldin"] = float(row.davies_bouldin)
+    if row.n_clusters is not None:
+        metrics["n_clusters"] = row.n_clusters
+    if row.noise_pct is not None:
+        metrics["noise_pct"] = row.noise_pct
+    return PipelineMetrics.model_validate(metrics)
+
+
 def _get_run_or_404(db: Session, run_id: str) -> AnalysisRun:
     row = db.get(AnalysisRun, run_id)
     if row is None:
@@ -310,7 +390,7 @@ def _run_summary_from_row(row: AnalysisRun) -> RunSummary:
         seed=row.seed,
         n_samples=row.n_samples,
         outliers_count=row.outliers_count,
-        metrics=_metrics_from_row(row),
+        metrics=_metrics_from_summary_row(row),
         project_id=row.project_id,
         project_name=row.project_name,
         source_type=row.source_type,
@@ -341,31 +421,60 @@ def _execute_and_persist_run(
     pipeline_overrides: dict | None = None,
 ) -> RunDetail:
     settings = get_settings()
-    result = run_pipeline(
-        modality=modality,
-        reduction_method=reduction_method,
-        seed=seed,
-        n_samples=n_samples,
-        dataset_path=settings.it_ops_dataset_path,
-        dataset_id=dataset_id,
-        user_id=user.id,
-        id_column=id_column,
-        exclude_columns=exclude_columns or None,
-        numeric_columns=numeric_columns,
-        categorical_columns=categorical_columns,
-        pipeline_overrides=pipeline_overrides,
+    timings: dict[str, float] = {}
+
+    def timed(step: str, callback):
+        started = perf_counter()
+        value = callback()
+        timings[step] = round(perf_counter() - started, 3)
+        return value
+
+    _notify_analysis_progress(
+        "prepare",
+        3,
+        "Preparando ejecucion y validando parametros.",
+    )
+    result = timed(
+        "pipeline_seconds",
+        lambda: run_pipeline(
+            modality=modality,
+            reduction_method=reduction_method,
+            seed=seed,
+            n_samples=n_samples,
+            dataset_path=settings.it_ops_dataset_path,
+            dataset_id=dataset_id,
+            user_id=user.id,
+            id_column=id_column,
+            exclude_columns=exclude_columns or None,
+            numeric_columns=numeric_columns,
+            categorical_columns=categorical_columns,
+            pipeline_overrides=pipeline_overrides,
+            progress_callback=_notify_analysis_progress,
+        ),
     )
     analyzed_rows = (
         len(result.metadata)
         if result.metadata
         else (n_samples or settings.default_n_samples)
     )
+
+    _notify_analysis_progress(
+        "json",
+        83,
+        "Armando resultado compacto y preparando persistencia.",
+    )
+    result_dump = timed("result_json_seconds", result.model_dump)
+    result_storage = timed(
+        "compact_json_seconds",
+        lambda: compact_pipeline_result_for_storage(result_dump),
+    )
     payload = {
         "modality": modality,
         "reduction_method": reduction_method,
         "seed": seed,
         "n_samples": analyzed_rows,
-        "result": result.model_dump(),
+        "result": result_dump,
+        "result_storage": result_storage,
         "project_id": project_id,
         "project_name": project_name,
         "source_type": source_type,
@@ -373,12 +482,37 @@ def _execute_and_persist_run(
         "source_name": source_name,
         "dataset_id": dataset_id,
     }
-    row = save_run(db, payload=payload)
-    detail = run_to_detail(row)
-    persist_run_detail(detail)
-    try_sync_bi_tables(row.id)
-    return RunDetail(**detail)
 
+    _notify_analysis_progress(
+        "save_run",
+        88,
+        "Guardando ejecucion y metricas resumidas.",
+    )
+    row = timed("save_run_seconds", lambda: save_run(db, payload=payload))
+    detail = run_to_detail(row)
+    persistence_detail = dict(detail)
+    persistence_detail["result"] = result_dump
+
+    _notify_analysis_progress(
+        "duckdb",
+        94,
+        "Guardando evidencias y preparando visualizacion.",
+    )
+    timed("persist_run_detail_seconds", lambda: persist_run_detail(persistence_detail))
+
+    _notify_analysis_progress(
+        "bi_sync",
+        98,
+        "Publicando tablas auxiliares y finalizando procesamiento.",
+    )
+    timed("bi_sync_seconds", lambda: try_sync_bi_tables(row.id))
+    logger.info(
+        "analysis_run_timing run_id=%s rows=%s timings=%s",
+        row.id,
+        analyzed_rows,
+        timings,
+    )
+    return RunDetail(**detail)
 
 @router.get("/health", response_model=HealthResponse)
 def health(db: Annotated[Session, Depends(get_db)]):
@@ -463,7 +597,7 @@ def get_dataset_profile_report(
     except ImportError as exc:
         raise HTTPException(
             status_code=503,
-            detail="ydata-profiling no está instalado en el servidor.",
+            detail="ydata-profiling no esta instalado en el servidor.",
         ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Dataset no encontrado") from exc
@@ -721,12 +855,24 @@ def create_project_runs(
     elif project.strategy == "unified":
         primary = primary_incidents_source(csv_sources)
         if primary is None:
-            raise HTTPException(status_code=400, detail="No hay fuente CSV válida")
+            raise HTTPException(status_code=400, detail="No hay fuente CSV valida")
         targets = [primary]
 
     runs: list[RunDetail] = []
+
+    def _set_project_job_slice(index: int, total: int, source_label: str) -> None:
+        if not getattr(_analysis_job_local, "job_id", None):
+            return
+        total = max(1, total)
+        _analysis_job_local.progress_base = 2 + (index / total) * 96
+        _analysis_job_local.progress_span = 96 / total
+        _analysis_job_local.progress_context = (
+            f"Fuente {index + 1} de {total} ({source_label}). "
+        )
+
     try:
         if merged_dataset_id:
+            _set_project_job_slice(0, 1, "unificado")
             run_detail = _execute_and_persist_run(
                 db,
                 user=user,
@@ -747,7 +893,12 @@ def create_project_runs(
                 pipeline_overrides=pipeline_overrides,
             )
             runs.append(run_detail)
-        for source in targets:
+        for source_index, source in enumerate(targets):
+            _set_project_job_slice(
+                source_index,
+                len(targets),
+                source_display_name(source),
+            )
             run_detail = _execute_and_persist_run(
                 db,
                 user=user,
@@ -825,6 +976,161 @@ def create_run(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
+def _analysis_job_or_404(job_id: str, user: User) -> dict:
+    job = _get_analysis_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de analisis no encontrado")
+    if job.get("user_id") != user.id:
+        raise HTTPException(status_code=403, detail="No tienes acceso a este job")
+    return job
+
+
+def _process_analysis_job(
+    job_id: str,
+    kind: str,
+    body_data: dict,
+    user_id: str,
+    project_id: str | None = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if user is None:
+            raise PermissionError("Usuario no encontrado")
+        _analysis_job_local.job_id = job_id
+        _set_analysis_job(
+            job_id,
+            status="processing",
+            stage="queued",
+            progress=2,
+            message="Analisis iniciado en segundo plano.",
+        )
+        if kind == "project":
+            if not project_id:
+                raise ValueError("Proyecto requerido para ejecutar el analisis")
+            response = create_project_runs(
+                project_id,
+                ProjectRunCreateBody(**body_data),
+                db,
+                user,
+            )
+        else:
+            response = create_run(RunCreateBody(**body_data), db, user)
+        result_payload = (
+            response.model_dump(mode="json")
+            if hasattr(response, "model_dump")
+            else response
+        )
+        _set_analysis_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            progress=100,
+            message="Analisis completado.",
+            result=result_payload,
+        )
+    except HTTPException as exc:
+        _set_analysis_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            progress=100,
+            message=str(exc.detail),
+            error=str(exc.detail),
+        )
+    except Exception as exc:  # pragma: no cover - se valida por job status
+        logger.exception("analysis_job_failed job_id=%s kind=%s", job_id, kind)
+        _set_analysis_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            progress=100,
+            message="No se pudo completar el analisis.",
+            error=str(exc),
+        )
+    finally:
+        for attr in ("job_id", "progress_base", "progress_span", "progress_context"):
+            if hasattr(_analysis_job_local, attr):
+                delattr(_analysis_job_local, attr)
+        db.close()
+
+
+@router.post("/api/runs/jobs", status_code=202)
+def create_run_job(
+    body: RunCreateBody,
+    background_tasks: BackgroundTasks,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    job_id = str(uuid.uuid4())
+    job = _set_analysis_job(
+        job_id,
+        user_id=user.id,
+        kind="run",
+        status="queued",
+        stage="queued",
+        progress=0,
+        message="Analisis en cola.",
+        created_at=_utc_now_iso(),
+    )
+    background_tasks.add_task(
+        _process_analysis_job,
+        job_id,
+        "run",
+        body.model_dump(),
+        user.id,
+        None,
+    )
+    return _public_analysis_job(job)
+
+
+@router.get("/api/runs/jobs/{job_id}")
+def get_run_job(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    return _public_analysis_job(_analysis_job_or_404(job_id, user))
+
+
+@router.post("/api/projects/{project_id}/runs/jobs", status_code=202)
+def create_project_runs_job(
+    project_id: str,
+    body: ProjectRunCreateBody,
+    background_tasks: BackgroundTasks,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    job_id = str(uuid.uuid4())
+    job = _set_analysis_job(
+        job_id,
+        user_id=user.id,
+        kind="project_runs",
+        project_id=project_id,
+        status="queued",
+        stage="queued",
+        progress=0,
+        message="Analisis del escenario en cola.",
+        created_at=_utc_now_iso(),
+    )
+    background_tasks.add_task(
+        _process_analysis_job,
+        job_id,
+        "project",
+        body.model_dump(),
+        user.id,
+        project_id,
+    )
+    return _public_analysis_job(job)
+
+
+@router.get("/api/projects/{project_id}/runs/jobs/{job_id}")
+def get_project_runs_job(
+    project_id: str,
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+):
+    job = _analysis_job_or_404(job_id, user)
+    if job.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail="Job de analisis no encontrado para este proyecto")
+    return _public_analysis_job(job)
 
 @router.delete("/api/runs", response_model=RunResetResponse)
 def clear_all_runs(
@@ -848,16 +1154,53 @@ def clear_all_runs(
 def list_runs(
     db: Annotated[Session, Depends(get_db)],
     _user: Annotated[User, Depends(get_current_user)],
-    limit: int = 20,
+    limit: int = Query(default=20, ge=1, le=100),
 ):
-    limit = min(max(1, limit), 100)
+    started = perf_counter()
     rows = (
         db.query(AnalysisRun)
+        .options(
+            load_only(
+                AnalysisRun.id,
+                AnalysisRun.created_at,
+                AnalysisRun.modality,
+                AnalysisRun.reduction_method,
+                AnalysisRun.seed,
+                AnalysisRun.n_samples,
+                AnalysisRun.outliers_count,
+                AnalysisRun.silhouette,
+                AnalysisRun.davies_bouldin,
+                AnalysisRun.n_clusters,
+                AnalysisRun.noise_pct,
+                AnalysisRun.project_id,
+                AnalysisRun.project_name,
+                AnalysisRun.source_type,
+                AnalysisRun.source_id,
+                AnalysisRun.source_name,
+                AnalysisRun.dataset_id,
+            )
+        )
         .order_by(AnalysisRun.created_at.desc())
         .limit(limit)
         .all()
     )
-    return [_run_summary_from_row(r) for r in rows]
+    summaries = [_run_summary_from_row(r) for r in rows]
+    elapsed = round(perf_counter() - started, 3)
+    if elapsed > 1:
+        logger.warning(
+            "runs_history_slow limit=%s rows=%s elapsed=%ss",
+            limit,
+            len(summaries),
+            elapsed,
+        )
+    else:
+        logger.info(
+            "runs_history_timing limit=%s rows=%s elapsed=%ss",
+            limit,
+            len(summaries),
+            elapsed,
+        )
+    return summaries
 
 
 @router.post("/api/runs/{run_id}/chat", response_model=ChatResponse)
@@ -895,7 +1238,7 @@ def chat_with_run(
     persist_exchange(
         run_id=run_id,
         user_id=user.id,
-        question=body.question,
+        question=body.display_question or body.question,
         response=response,
     )
     return response
@@ -1183,6 +1526,18 @@ def select_run_insights_batch(
     return InsightBatchSelectionResponse(saved=saved)
 
 
+@router.get("/api/runs/{run_id}/insights/selected", response_model=SelectedInsightsResponse)
+def get_run_selected_insights(
+    run_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    _materialize_run_in_duckdb(row)
+    insights = list_selected_insights(run_id=run_id, user_id=user.id)
+    return SelectedInsightsResponse(total=len(insights), insights=insights)
+
+
 @router.get("/api/conversation-dashboard", response_model=ConversationDashboardResponse)
 def get_conversation_dashboard(
     db: Annotated[Session, Depends(get_db)],
@@ -1193,7 +1548,147 @@ def get_conversation_dashboard(
         row = _get_run_or_404(db, run_id)
         _materialize_run_in_duckdb(row)
     insights = list_selected_insights(run_id=run_id, user_id=user.id)
-    return ConversationDashboardResponse(total=len(insights), insights=insights)
+    dashboard_spec = build_dashboard_spec(
+        db=db,
+        user_id=user.id,
+        run_id=run_id,
+        insights=insights,
+    )
+    return ConversationDashboardResponse(
+        total=len(insights),
+        insights=insights,
+        dashboard_spec=dashboard_spec,
+    )
+
+
+@router.get("/api/conversation/semantic-dictionary")
+def get_conversation_semantic_dictionary(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    refresh: bool = False,
+    run_id: str | None = None,
+    project_id: str | None = None,
+):
+    dictionary_project_id = project_id
+    if run_id:
+        row = _get_run_or_404(db, run_id)
+        dictionary_project_id = row.project_id or dictionary_project_id
+    if refresh:
+        reload_semantic_dictionary()
+    dictionary = get_semantic_dictionary(SEMANTIC_VARIABLES, project_id=dictionary_project_id)
+    status = semantic_dictionary_status(SEMANTIC_VARIABLES, project_id=dictionary_project_id)
+    configured_variables = load_configured_semantic_variables(project_id=dictionary_project_id)
+    seen: set[tuple[str, str, str]] = set()
+    variables: list[dict[str, Any]] = []
+    for lookup_key, entry in sorted(dictionary.items()):
+        identity = (
+            str(entry.get("label") or lookup_key),
+            str(entry.get("role") or ""),
+            str(entry.get("description") or ""),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        variables.append(
+            {
+                "lookup_key": lookup_key,
+                "label": entry.get("label") or lookup_key,
+                "role": entry.get("role") or "unknown",
+                "semantic_type": entry.get("semantic_type") or "",
+                "can_chart": bool(entry.get("can_chart", True)),
+                "avoid_as_metric": bool(entry.get("avoid_as_metric", False)),
+                "avoid_as_dimension": bool(entry.get("avoid_as_dimension", False)),
+                "description": entry.get("description") or "",
+                "recommended_use": entry.get("recommended_use") or "",
+                "aliases": entry.get("aliases") or [],
+                "source": entry.get("source") or "base",
+                "confidence": entry.get("confidence") or "media",
+                "active": entry.get("active", True),
+                "enabled_profiles": entry.get("enabled_profiles") or [],
+                "domain": entry.get("domain") or "",
+                "owner": entry.get("owner") or "",
+                "version": entry.get("version") or "",
+                "max_cardinality": entry.get("max_cardinality"),
+                "max_null_ratio": entry.get("max_null_ratio"),
+            }
+        )
+    return {
+        "source": str(semantic_dictionary_path(dictionary_project_id)),
+        "exists": status["exists"],
+        "scope": status["scope"],
+        "project_id": status.get("project_id") or "",
+        "env_var": status["env_var"],
+        "configurable": status["configurable"],
+        "writable": status["writable"],
+        "base_total": status["base_total"],
+        "configured_total": status["configured_total"],
+        "active_configured_total": status.get("active_configured_total", 0),
+        "inactive_configured_total": status.get("inactive_configured_total", 0),
+        "governed": status["governed"],
+        "total": len(variables),
+        "variables": variables,
+        "configured_variables": configured_variables,
+    }
+
+
+@router.put("/api/conversation/semantic-dictionary")
+def update_conversation_semantic_dictionary(
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    payload: dict[str, Any] = Body(...),
+    run_id: str | None = None,
+    project_id: str | None = None,
+):
+    dictionary_project_id = project_id
+    if run_id:
+        row = _get_run_or_404(db, run_id)
+        dictionary_project_id = row.project_id or dictionary_project_id
+    entries = payload.get("variables") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Se esperaba un arreglo 'variables'.")
+    result = save_configured_semantic_variables(entries, project_id=dictionary_project_id)
+    return {
+        "source": result["path"],
+        "scope": result["scope"],
+        "project_id": result.get("project_id") or "",
+        "total": result["total"],
+        "active_total": result.get("active_total", 0),
+        "inactive_total": result.get("inactive_total", 0),
+        "variables": result["variables"],
+    }
+
+
+@router.post(
+    "/api/runs/{run_id}/conversation-chart-data",
+    response_model=ConversationChartDataResponse,
+)
+def get_run_conversation_chart_data(
+    run_id: str,
+    body: ConversationChartDataRequest,
+    db: Annotated[Session, Depends(get_db)],
+    _user: Annotated[User, Depends(get_current_user)],
+):
+    row = _get_run_or_404(db, run_id)
+    visualization = body.visualization.model_dump()
+    try:
+        _materialize_run_in_duckdb(row)
+        return build_conversation_chart_data(
+            run_id=run_id,
+            visualization=visualization,
+            limit=body.limit,
+            evidence_limit=body.evidence_limit,
+            project_id=row.project_id,
+        )
+    except Exception as exc:
+        logger.exception("Error calculating conversation chart data for run_id=%s", run_id)
+        return build_conversation_chart_error_response(
+            run_id=run_id,
+            visualization=visualization,
+            warning=(
+                "No se pudo calcular el grafico real al consultar o agregar las evidencias. "
+                "Actualiza la ejecucion o prueba con otra vista sugerida."
+            ),
+        )
 
 
 @router.get("/api/metabase/status", response_model=MetabaseStatusResponse)
@@ -1220,7 +1715,7 @@ def metabase_embed_token(
     except Exception as exc:
         return MetabaseEmbedTokenResponse(
             status="error",
-            message=f"No se pudo generar el token de incrustación: {exc}",
+            message=f"No se pudo generar el token de incrustacion: {exc}",
         )
 
 
@@ -1282,7 +1777,7 @@ def delete_run_route(
         run_id=run_id,
         duckdb_tables_cleared=result.get("duckdb_tables_cleared") or {},
         bi_tables_cleared=result.get("bi_tables_cleared"),
-        message="Se eliminó la ejecución y sus datos analíticos asociados.",
+        message="Se elimino la ejecucion y sus datos analiticos asociados.",
     )
 
 
@@ -1294,7 +1789,7 @@ def get_run(
 ):
     row = db.get(AnalysisRun, run_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Ejecución no encontrada")
+        raise HTTPException(status_code=404, detail="Ejecucion no encontrada")
     _materialize_run_in_duckdb(row)
     return RunDetail(**run_to_detail(row))
 
@@ -1305,8 +1800,8 @@ def get_cluster_profiles(
     db: Session = Depends(get_db),
 ):
     """
-    Devuelve el perfil operativo de cada cluster para un run específico.
-    Incluye el modo de visualización recomendado según el número de clusters.
+    Devuelve el perfil operativo de cada cluster para un run especifico.
+    Incluye el modo de visualizacion recomendado segun el numero de clusters.
     """
     import numpy as np
     from app.services.pipeline.cluster_profiler import (
@@ -1340,7 +1835,7 @@ def get_cluster_profiles(
     stats_globales = calcular_stats_globales(df_meta)
     perfiles       = cluster_profiler(df_meta, labels, stats_globales)
 
-    # Número de clusters sin ruido
+    # Numero de clusters sin ruido
     n_clusters = len([p for p in perfiles if not p["es_ruido"]])
     modo       = modo_visualizacion(n_clusters)
 
