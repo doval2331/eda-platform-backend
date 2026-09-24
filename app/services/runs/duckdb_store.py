@@ -754,6 +754,7 @@ def list_chat_messages(
     run_id: str,
     user_id: str | None = None,
     limit: int = 200,
+    exclude_kinds: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     init_duckdb()
     filters = ["run_id = ?"]
@@ -761,6 +762,9 @@ def list_chat_messages(
     if user_id:
         filters.append("(user_id = ? OR user_id IS NULL)")
         params.append(user_id)
+    for kind in exclude_kinds:
+        filters.append("COALESCE(metadata_json, '') NOT LIKE ?")
+        params.append(f'%"kind": "{kind}"%')
     where_clause = " AND ".join(filters)
     safe_limit = max(1, min(int(limit), 500))
 
