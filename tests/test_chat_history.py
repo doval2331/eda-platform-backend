@@ -1,4 +1,33 @@
+from app.services.conversation.chat_history import load_history
 from app.services.runs.duckdb_store import append_chat_message, clear_run_data, list_chat_messages
+
+
+def test_load_history_hides_dashboard_telemetry():
+    run_id = "test-chat-history-telemetry"
+    user_id = "user-chat-telemetry"
+    clear_run_data(run_id)
+
+    append_chat_message(run_id, user_id=user_id, role="user", text="Hola")
+    append_chat_message(
+        run_id,
+        user_id=user_id,
+        role="assistant",
+        text="Evento del dashboard conversacional: visualization_selected.",
+        metadata={"kind": "conversation_dashboard_event", "event_type": "visualization_selected"},
+    )
+    append_chat_message(
+        run_id,
+        user_id=user_id,
+        role="assistant",
+        text="Feedback del dashboard conversacional: recomendacion util.",
+        metadata={"kind": "conversation_dashboard_feedback", "helpful": True},
+    )
+
+    history = load_history(run_id=run_id, user_id=user_id)
+    assert [message.text for message in history] == ["Hola"]
+    assert len(list_chat_messages(run_id=run_id, user_id=user_id)) == 3
+
+    clear_run_data(run_id)
 
 
 def test_append_and_list_chat_messages_by_user():

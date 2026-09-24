@@ -10,8 +10,16 @@ def _insights_to_metadata(insights: list[InsightCandidate]) -> list[dict[str, An
     return [item.model_dump() for item in insights]
 
 
+DASHBOARD_TELEMETRY_KINDS = ("conversation_dashboard_event", "conversation_dashboard_feedback")
+
+
 def load_history(*, run_id: str, user_id: str | None, limit: int = 200) -> list[ChatMessageRecord]:
-    rows = list_chat_messages(run_id=run_id, user_id=user_id, limit=limit)
+    rows = list_chat_messages(
+        run_id=run_id,
+        user_id=user_id,
+        limit=limit,
+        exclude_kinds=DASHBOARD_TELEMETRY_KINDS,
+    )
     messages: list[ChatMessageRecord] = []
     for row in rows:
         insights_raw = row.get("insights") or []
